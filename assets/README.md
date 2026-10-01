@@ -17,6 +17,24 @@ Store reusable font files and generated font sources in `fonts/`.
 - Check Flash and internal-RAM impact before adding a font; the ESP32-C3 has no PSRAM.
 - Do not commit fonts whose license does not permit redistribution.
 
+### Diamond Sutra app fonts
+
+`fonts/sutra_cjk_14.c`, `fonts/sutra_cjk_16.c`, and
+`fonts/sutra_cjk_20.c` are generated LVGL 9 plain 4 bpp subsets. The inventory
+in `fonts/sutra_cjk_symbols.txt` covers all checked-in scripture, study prompts,
+and UI strings.
+
+| Item | Value |
+| --- | --- |
+| Source | Noto Serif CJK SC Medium (Source Han Serif / Song style), Copyright 2014-2021 Adobe, SIL Open Font License 1.1 |
+| Source URL | `notofonts/noto-cjk`, `Serif/OTF/SimplifiedChinese/NotoSerifCJKsc-Medium.otf`; source font is downloaded for generation and is not committed |
+| Source SHA-256 | `19322be2ecf5dd2abd546db7a86cc83c286026cbd28593583bfcfd721e48c9fe` |
+| Inventory | 1,003 code points, including printable ASCII |
+| Generator | `tools/sutra_font.py`, Pillow/FreeType rasterization with generated-file pixel verification |
+| Regenerate | `python tools/sutra_font.py --font /path/to/NotoSerifCJKsc-Medium.otf` |
+| Verify | `python tools/sutra_font.py --check` |
+| Integration | Compiled into `main` by `main/CMakeLists.txt`; bitmap data remains in Flash |
+
 ## Images
 
 Store reusable source images and generated display assets in `images/`.

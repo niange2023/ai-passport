@@ -508,6 +508,28 @@ esp_err_t bsp_audio_sleep(void) {
 
 esp_err_t bsp_audio_prepare_deep_sleep(void) {
     esp_err_t first_error = audio_disable_i2s_channels();
+
+    // An application that never played audio may leave ES8311 at its power-on
+    // defaults. Put it to sleep through a temporary control interface before
+    // making I2S pins high impedance, otherwise the always-on amplifier can
+    // amplify floating inputs.
+    const bool temporary_control = (s_ctrl == NULL);
+    if (temporary_control && bsp_i2c_init() == ESP_OK) {
+        s_ctrl = audio_codec_new_i2c_ctrl(&(audio_codec_i2c_cfg_t){
+            .port = BSP_I2C_PORT,
+            .addr = BSP_I2C_ES8311_ADDR << 1,
+            .bus_handle = bsp_i2c_bus(),
+        });
+        if (!s_ctrl) ESP_LOGW(TAG, "Could not create ES8311 sleep control");
+    }
+    if (s_ctrl) {
+        esp_err_t error = es8311_force_sleep();
+        if (error != ESP_OK && first_error == ESP_OK) first_error = error;
+        if (temporary_control) {
+            audio_codec_delete_ctrl_if(s_ctrl);
+            s_ctrl = NULL;
+        }
+    }
     const int pins[] = {
         BSP_I2S_MCLK, BSP_I2S_BCLK, BSP_I2S_WS, BSP_I2S_DOUT, BSP_I2S_DIN,
     };

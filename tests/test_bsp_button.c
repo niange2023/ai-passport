@@ -11,6 +11,7 @@ static int create_calls, callback_calls, fail_create, fail_callback;
 static int fail_adc, fail_channel, fail_cal, fail_read, fail_convert, fail_delete;
 static int raw_mv, reads, events;
 static int64_t clock_us;
+static int gpio_direction_calls, gpio_pull_calls, gpio_level = 1;
 
 esp_err_t adc_oneshot_new_unit(const adc_oneshot_unit_init_cfg_t *cfg, adc_oneshot_unit_handle_t *h) {
     assert(cfg->unit_id == BSP_BTN_ADC_UNIT && !adc_live);
@@ -46,6 +47,19 @@ esp_err_t adc_cali_raw_to_voltage(adc_cali_handle_t h, int raw, int *mv) {
     *mv = raw; return ESP_OK;
 }
 int64_t esp_timer_get_time(void) { return clock_us; }
+esp_err_t gpio_set_direction(gpio_num_t pin, gpio_mode_t mode) {
+    assert(pin == BSP_BTN_GPIO && mode == GPIO_MODE_INPUT);
+    ++gpio_direction_calls; return ESP_OK;
+}
+esp_err_t gpio_set_pull_mode(gpio_num_t pin, gpio_pull_mode_t mode) {
+    assert(pin == BSP_BTN_GPIO && mode == GPIO_PULLUP_ONLY);
+    ++gpio_pull_calls; return ESP_OK;
+}
+int gpio_get_level(gpio_num_t pin) {
+    assert(pin == BSP_BTN_GPIO);
+    return gpio_level;
+}
+void vTaskDelay(int ticks) { assert(ticks == 20); }
 esp_err_t iot_button_create(const button_config_t *cfg, const button_driver_t *driver, button_handle_t *h) {
     // 判定门限必须由 BSP 显式下发(bsp_pins.h),不能退回组件默认的 180 / 1500ms。
     assert(cfg->short_press_time == BSP_BTN_SHORT_PRESS_MS);
@@ -133,5 +147,10 @@ int main(void) {
     assert(adc_live && cal_live && live_buttons == BSP_BTN_COUNT);
     assert(bsp_button_init(event_cb, &events) == ESP_ERR_INVALID_STATE);
     fail_delete = 0; button_cleanup(); retry_success();
+    int level = -1;
+    assert(bsp_button_prepare_deep_sleep(&level) == ESP_OK);
+    assert(level == 1);
+    assert(gpio_direction_calls == 1 && gpio_pull_calls == 1);
+    assert_clean();
     puts("BSP button fault-injection tests: PASS");
 }

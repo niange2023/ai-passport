@@ -15,6 +15,23 @@
 - 添加字库前评估 Flash 与内部 RAM 影响；ESP32-C3 无 PSRAM。
 - 不提交许可不允许分发的字库。
 
+### 《金刚经》应用字库
+
+`fonts/sutra_cjk_14.c`、`fonts/sutra_cjk_16.c` 与
+`fonts/sutra_cjk_20.c` 是生成的 LVGL 9 plain 4 bpp 字体子集。
+`fonts/sutra_cjk_symbols.txt` 覆盖已入库经文、学习提示和界面文案。
+
+| 项 | 值 |
+| --- | --- |
+| 来源 | Noto Serif CJK SC Medium（思源宋体中等字重），Copyright 2014-2021 Adobe，SIL Open Font License 1.1 |
+| 源地址 | `notofonts/noto-cjk` 的 `Serif/OTF/SimplifiedChinese/NotoSerifCJKsc-Medium.otf`；生成时下载，不提交源字体 |
+| 源文件 SHA-256 | `19322be2ecf5dd2abd546db7a86cc83c286026cbd28593583bfcfd721e48c9fe` |
+| 字符范围 | 1,003 个码位，包含可打印 ASCII |
+| 生成器 | `tools/sutra_font.py`，使用 Pillow/FreeType 栅格化，并逐像素回读验证生成文件 |
+| 重新生成 | `python tools/sutra_font.py --font /path/to/NotoSerifCJKsc-Medium.otf` |
+| 校验 | `python tools/sutra_font.py --check` |
+| 集成方式 | 由 `main/CMakeLists.txt` 编入 `main` 组件；位图数据常驻 Flash |
+
 ## 图片（images）
 
 可复用的源图与生成的显示资产放在 `images/`。

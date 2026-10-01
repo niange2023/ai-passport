@@ -2,12 +2,15 @@
 // 移植自 trae_card/components/platform/platform_esp32/src/btn_iot_button.c
 #include "bsp_button.h"
 #include "bsp_pins.h"
+#include "driver/gpio.h"
 #include "iot_button.h"
 #include "esp_adc/adc_oneshot.h"
 #include "esp_adc/adc_cali.h"
 #include "esp_adc/adc_cali_scheme.h"
 #include "esp_log.h"
 #include "esp_timer.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 
 static const char *TAG = "bsp_btn";
 
@@ -214,4 +217,27 @@ int bsp_button_read_mv(void) {
     if (adc_oneshot_read(s_adc, BSP_BTN_ADC_CHANNEL, &raw) != ESP_OK) return -1;
     if (adc_cali_raw_to_voltage(s_cali, raw, &mv) != ESP_OK) return -1;
     return mv;
+}
+
+esp_err_t bsp_button_prepare_deep_sleep(int *level)
+{
+    // The button timer must stop before ADC1 is released.
+    button_cleanup();
+
+    // ADC ownership makes the digital input read low. Restore GPIO input before
+    // enabling a low-level deep-sleep wake source, otherwise the board wakes
+    // immediately.
+    const gpio_num_t pin = (gpio_num_t)BSP_BTN_GPIO;
+    esp_err_t error = gpio_set_direction(pin, GPIO_MODE_INPUT);
+    if (error == ESP_OK) error = gpio_set_pull_mode(pin, GPIO_PULLUP_ONLY);
+    if (error != ESP_OK) {
+        ESP_LOGE(TAG, "按键脚切回数字输入失败: %s", esp_err_to_name(error));
+        return error;
+    }
+
+    vTaskDelay(pdMS_TO_TICKS(20));
+    if (level) *level = gpio_get_level(pin);
+    ESP_LOGI(TAG, "按键已释放,深度休眠唤醒脚 GPIO%d 电平=%d",
+             (int)pin, level ? *level : -1);
+    return ESP_OK;
 }

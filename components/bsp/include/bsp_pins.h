@@ -52,6 +52,7 @@
 // ============================================================================
 #define BSP_BTN_ADC_UNIT     ADC_UNIT_1
 #define BSP_BTN_ADC_CHANNEL  ADC_CHANNEL_0    // GPIO0
+#define BSP_BTN_GPIO         0
 #define BSP_BTN_COUNT        3
 
 // 按键判定时序(ms):由 BSP 显式下发给 button 组件,不依赖它的 Kconfig 默认值。

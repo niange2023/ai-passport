@@ -31,3 +31,8 @@ esp_err_t bsp_button_init(bsp_btn_cb_t cb, void *user);
 // ★ 换了分压/上拉阻值后,用它测出自己的三档电压,再改 bsp_pins.h 的 BSP_BTN_MV_TABLE。
 // 读取失败返回 -1。
 int bsp_button_read_mv(void);
+
+// Deep-sleep terminal operation: stop the button devices, release ADC1, return
+// the shared key pin to digital input with pull-up, and optionally report its
+// level (1 means released). Call only immediately before deep sleep or restart.
+esp_err_t bsp_button_prepare_deep_sleep(int *level);
