@@ -17,6 +17,13 @@ Store reusable font files and generated font sources in `fonts/`.
 - Check Flash and internal-RAM impact before adding a font; the ESP32-C3 has no PSRAM.
 - Do not commit fonts whose license does not permit redistribution.
 
+### Command Tower app fonts
+
+`fonts/tower_cjk_12.c` and `fonts/tower_cjk_14.c` are generated LVGL 9 plain 4 bpp font subsets.
+The character inventory in `fonts/tower_cjk_symbols.txt` covers all privacy-scrubbed workstation codes,
+status labels, and UI strings. Generated from LXGW WenKai GB Lite Regular (SIL Open Font License 1.1,
+see `fonts/LXGW-WenKai-OFL.txt`) and verified with `python3 tools/tower_font.py --check`.
+
 ## Images
 
 Store reusable source images and generated display assets in `images/`.

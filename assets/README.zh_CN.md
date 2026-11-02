@@ -15,6 +15,13 @@
 - 添加字库前评估 Flash 与内部 RAM 影响；ESP32-C3 无 PSRAM。
 - 不提交许可不允许分发的字库。
 
+### 双焦像素总控台（Command Tower）字库
+
+`fonts/tower_cjk_12.c` 与 `fonts/tower_cjk_14.c` 是生成的 LVGL 9 plain 4 bpp 字体子集，
+字符范围记录在 `fonts/tower_cjk_symbols.txt`，覆盖总控台全部脱敏状态标签、按键提示与配网说明。
+源字体采用霞鹜文楷（LXGW WenKai GB Lite Regular，SIL Open Font License 1.1，见 `fonts/LXGW-WenKai-OFL.txt`），
+通过 `python3 tools/tower_font.py --check` 验证字形覆盖。
+
 ## 图片（images）
 
 可复用的源图与生成的显示资产放在 `images/`。
