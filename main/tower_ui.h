@@ -1,12 +1,10 @@
 // main/tower_ui.h
-// 「3-B 双焦像素总控台 (Command Tower)」LVGL 240x320 界面渲染接口。
+// 「AI 工位看板 (6 工位大字人话版)」LVGL 240x320 界面渲染接口。
 //
-// 界面分为上下双焦结构：
-// 1. 顶部状态栏 (0..24px)：标题 + 链路标志 + 紧急计数 + 右上角实时电量。
-// 2. 上屏双焦大工位 (26..138px)：左工位固定锁定头号紧急窗口，右工位跟随当前光标或二号紧急窗口，
-//    内含动态像素小人（举手呼救/报喜、敲键盘、趴桌休息）与像素显示器。
-// 3. 下屏 4x3 十二窗口雷达矩阵 (142..292px)：12 个工作窗口状态色块与时长一览无余，全程零敏感文字。
-// 4. 底部操作栏 (296..320px)：按键指引与切窗/收菜瞬态反馈。
+// 界面采用 2 列 × 3 行共 6 个大像素工位布局（全屏无重复区域、无英文缩写密码）：
+// - 每个工位直接显示「工具名·动作类型」（如「Trae·写文章」「Cursor·写代码」）；
+// - 中间绘制动态像素小人与电脑桌；
+// - 底部胶囊条直接写中文大白话状态（「等你确认」「跑完了!」「正在用」「后台跑着」「休息中」）。
 #pragma once
 
 #include "lvgl.h"
@@ -14,16 +12,48 @@
 #include "tower_store.h"
 
 typedef struct {
+    lv_obj_t *card;
+    lv_obj_t *header_label;
+    lv_obj_t *desk;
+    lv_obj_t *monitor_case;
+    lv_obj_t *monitor_screen;
+    lv_obj_t *monitor_scan;
+    lv_obj_t *monitor_stand;
+    lv_obj_t *hair;
+    lv_obj_t *head;
+    lv_obj_t *eye;
+    lv_obj_t *body;
+    lv_obj_t *arm_left;
+    lv_obj_t *hand_right;
+    lv_obj_t *bubble_box;
+    lv_obj_t *bubble_label;
+    lv_obj_t *sleep_label;
+    lv_obj_t *pill;
+    lv_obj_t *status_label;
+} tower_desk_widgets_t;
+
+typedef struct {
     lv_obj_t *screen;
+    lv_obj_t *top_title_label;
     lv_obj_t *battery_fill;
     lv_obj_t *battery_label;
     lv_timer_t *battery_timer;
+    // 6 个大像素工位层 (2 列 × 3 行)
+    lv_obj_t *main_layer;
+    tower_desk_widgets_t desks[TOWER_SLOT_COUNT];
+    // 连接状态说明层（长按 OK 切换）
+    lv_obj_t *link_layer;
+    lv_obj_t *link_mode_label;
+    lv_obj_t *link_seq_label;
+    lv_obj_t *link_ssid_label;
+    lv_obj_t *link_url_label;
+    // 底部操作栏
+    lv_obj_t *footer_label;
     const lv_font_t *font_small;
     const lv_font_t *font_body;
     const tower_wifi_cfg_t *wifi_cfg;
 } tower_ui_t;
 
-// 初始化 UI 上下文并构建首次屏幕对象树（调用方须持有 bsp_lvgl_lock）。
 void tower_ui_init(
     tower_ui_t *ui,
     const tower_model_t *model,
@@ -32,5 +62,4 @@ void tower_ui_init(
     const lv_font_t *font_body
 );
 
-// 根据最新状态模型重建并刷新当前屏幕（调用方须持有 bsp_lvgl_lock）。
 void tower_ui_render(tower_ui_t *ui, const tower_model_t *model);

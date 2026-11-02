@@ -1,36 +1,93 @@
 // main/tower_model.c
-// 「3-B 双焦像素总控台 (Command Tower)」纯逻辑状态机与零泄密协议解析实现。
-//
-// 所有函数均不依赖 ESP-IDF 或 LVGL，可在主机测试与设备运行时复用。
+// 「AI 工位看板 (6 工位大字人话版)」纯逻辑状态机与协议解析实现。
 #include "tower_model.h"
 
 #include <stdio.h>
 #include <string.h>
 
-// 内置 12 窗口脱敏演示快照：当设备未连接 USB 串口或 Wi-Fi 时提供开箱即用的完整体验。
-// 仅含固定应用代号、状态枚举和分钟数，不含任何业务或文档名称。
+// 默认展示的 6 个常用 AI 与工作工位（未连电脑或刚开机时一眼看懂）
 static const tower_slot_t k_default_slots[TOWER_SLOT_COUNT] = {
-    { "AIME",  TOWER_STATE_WAIT,   8  },
-    { "TRAE1", TOWER_STATE_DONE,   2  },
-    { "CURS2", TOWER_STATE_DONE,   5  },
-    { "MULT",  TOWER_STATE_WAIT,   3  },
-    { "CURS1", TOWER_STATE_ACTIVE, 1  },
-    { "TRAE2", TOWER_STATE_RUN,    4  },
-    { "CHRM1", TOWER_STATE_RUN,    6  },
-    { "CHRM2", TOWER_STATE_RUN,    11 },
-    { "GROK",  TOWER_STATE_IDLE,   19 },
-    { "SHIY",  TOWER_STATE_IDLE,   24 },
-    { "TERM",  TOWER_STATE_IDLE,   32 },
-    { "FEIS",  TOWER_STATE_IDLE,   41 },
+    { "TRAE1", TOWER_ROLE_WRITE,  TOWER_STATE_DONE,   2  },
+    { "AIME",  TOWER_ROLE_SEARCH, TOWER_STATE_WAIT,   5  },
+    { "CURS1", TOWER_ROLE_CODE,   TOWER_STATE_ACTIVE, 1  },
+    { "MULT",  TOWER_ROLE_TASK,   TOWER_STATE_RUN,    4  },
+    { "CHRM1", TOWER_ROLE_DOC,    TOWER_STATE_RUN,    8  },
+    { "FEIS",  TOWER_ROLE_CHAT,   TOWER_STATE_IDLE,   20 },
 };
 
-// 计算单个窗口槽位在「上屏紧急工位」排序中的优先级得分（数值越小越优先）。
-// 排序规则：
-// 1. TOWER_STATE_WAIT（等拍板）最优先，且等待分钟数越久越靠前；
-// 2. TOWER_STATE_DONE（待收菜）次之，且完成未查看分钟数越久越靠前；
-// 3. TOWER_STATE_ACTIVE（当前焦点窗口）第三；
-// 4. TOWER_STATE_RUN（后台运行中）第四，越近活跃越靠前；
-// 5. TOWER_STATE_IDLE（闲置）最后。
+// 根据内部代号返回直白工具名
+static const char *tool_display_name(const char *code)
+{
+    if (!code) return "工具";
+    if (strncmp(code, "TRAE", 4) == 0) return "Trae";
+    if (strncmp(code, "CURS", 4) == 0) return "Cursor";
+    if (strncmp(code, "AIME", 4) == 0) return "Aime";
+    if (strncmp(code, "MULT", 4) == 0) return "Multica";
+    if (strncmp(code, "CHRM", 4) == 0) return "浏览器";
+    if (strncmp(code, "FEIS", 4) == 0) return "飞书";
+    if (strncmp(code, "GROK", 4) == 0) return "Grok";
+    if (strncmp(code, "TERM", 4) == 0) return "终端";
+    if (strncmp(code, "SHIY", 4) == 0) return "拾页";
+    return code;
+}
+
+// 根据动作枚举返回模糊动作类型词（不露任何具体文件名）
+static const char *role_display_name(uint8_t role)
+{
+    switch ((tower_role_t)role) {
+    case TOWER_ROLE_CODE:
+        return "写代码";
+    case TOWER_ROLE_WRITE:
+        return "写文章";
+    case TOWER_ROLE_DOC:
+        return "看文档";
+    case TOWER_ROLE_TASK:
+        return "跑任务";
+    case TOWER_ROLE_SEARCH:
+        return "查资料";
+    case TOWER_ROLE_DESIGN:
+        return "做设计";
+    case TOWER_ROLE_CHAT:
+        return "聊协作";
+    case TOWER_ROLE_TERM:
+    default:
+        return "跑脚本";
+    }
+}
+
+void tower_model_format_title(
+    const tower_slot_t *slot,
+    char *out_buf,
+    size_t out_size
+)
+{
+    if (!slot || !out_buf || out_size == 0) return;
+    snprintf(
+        out_buf,
+        out_size,
+        "%s·%s",
+        tool_display_name(slot->code),
+        role_display_name(slot->role)
+    );
+}
+
+const char *tower_model_state_text(uint8_t state)
+{
+    switch ((tower_state_t)state) {
+    case TOWER_STATE_WAIT:
+        return "等你确认";
+    case TOWER_STATE_DONE:
+        return "跑完了!";
+    case TOWER_STATE_ACTIVE:
+        return "正在用";
+    case TOWER_STATE_RUN:
+        return "后台跑着";
+    case TOWER_STATE_IDLE:
+    default:
+        return "休息中";
+    }
+}
+
 static int32_t slot_priority_key(const tower_slot_t *slot, uint8_t index)
 {
     int32_t rank = 4;
@@ -59,7 +116,6 @@ static int32_t slot_priority_key(const tower_slot_t *slot, uint8_t index)
     return rank * 100000 + time_score * 32 + (int32_t)index;
 }
 
-// 重新统计各状态窗口数量，并选出最紧急的前 2 个槽位放入 stage_slots。
 void tower_model_recompute_stage(tower_model_t *model)
 {
     if (!model) return;
@@ -90,7 +146,6 @@ void tower_model_recompute_stage(tower_model_t *model)
         }
     }
 
-    // 12 个元素使用简单插入排序即可保持稳定、无递归、零额外栈开销。
     for (uint8_t i = 1; i < TOWER_SLOT_COUNT; i++) {
         uint8_t cur = order[i];
         int32_t cur_key = slot_priority_key(&model->slots[cur], cur);
@@ -114,7 +169,6 @@ void tower_model_recompute_stage(tower_model_t *model)
     model->stage_slots[1] = order[1];
 }
 
-// 初始化总控台模型：加载默认 12 个脱敏工位，计算 Top 2 紧急工位，并将光标置于最急工位。
 void tower_model_init(tower_model_t *model)
 {
     if (!model) return;
@@ -126,10 +180,6 @@ void tower_model_init(tower_model_t *model)
     model->selected_slot = model->stage_slots[0];
 }
 
-// 计算上屏左右两个大像素工位展示的槽位编号：
-// 左工位始终锁定全场最紧急的 1 号窗口 (stage_slots[0])；
-// 右工位在用户移动光标巡视其他窗口时实时放大展示 selected_slot，
-// 若光标就在 1 号紧急窗口上，则右工位展示 2 号紧急窗口 (stage_slots[1])。
 void tower_model_get_stage_pair(
     const tower_model_t *model,
     uint8_t *left_slot,
@@ -145,7 +195,6 @@ void tower_model_get_stage_pair(
     *right_slot = (sel != s0) ? sel : s1;
 }
 
-// 处理物理三键输入，更新光标、界面或状态，并生成需要发给 Mac 的控制指令。
 tower_model_result_t tower_model_handle_input(
     tower_model_t *model,
     tower_input_t input
@@ -173,7 +222,7 @@ tower_model_result_t tower_model_handle_input(
             snprintf(
                 model->toast_text,
                 sizeof(model->toast_text),
-                "正在请求同步 12 窗状态..."
+                "正在从电脑刷新状态..."
             );
             model->toast_ticks = 6;
             result.redraw = true;
@@ -185,7 +234,6 @@ tower_model_result_t tower_model_handle_input(
         return result;
     }
 
-    // 主界面 (TOWER_SCREEN_MAIN) 按键逻辑
     uint8_t sel = model->selected_slot < TOWER_SLOT_COUNT ? model->selected_slot : 0;
 
     if (input == TOWER_INPUT_UP) {
@@ -203,13 +251,13 @@ tower_model_result_t tower_model_handle_input(
     }
 
     if (input == TOWER_INPUT_OK) {
-        const tower_slot_t *slot = &model->slots[sel];
+        char title[24];
+        tower_model_format_title(&model->slots[sel], title, sizeof(title));
         snprintf(
             model->toast_text,
             sizeof(model->toast_text),
-            "已切至 #%02u %s",
-            (unsigned)(sel + 1U),
-            slot->code
+            "电脑切到：%s",
+            title
         );
         model->toast_ticks = 8;
         result.redraw = true;
@@ -220,6 +268,8 @@ tower_model_result_t tower_model_handle_input(
 
     if (input == TOWER_INPUT_OK_DOUBLE) {
         tower_slot_t *slot = &model->slots[sel];
+        char title[24];
+        tower_model_format_title(slot, title, sizeof(title));
         if (slot->state == TOWER_STATE_WAIT || slot->state == TOWER_STATE_DONE) {
             slot->state = TOWER_STATE_RUN;
             slot->minutes = 1;
@@ -227,9 +277,8 @@ tower_model_result_t tower_model_handle_input(
         snprintf(
             model->toast_text,
             sizeof(model->toast_text),
-            "已收菜 #%02u %s",
-            (unsigned)(sel + 1U),
-            slot->code
+            "已看完：%s",
+            title
         );
         model->toast_ticks = 8;
         tower_model_recompute_stage(model);
@@ -243,7 +292,6 @@ tower_model_result_t tower_model_handle_input(
     return result;
 }
 
-// 将单字符状态码 ('W'/'D'/'A'/'R'/'I') 转换为枚举值。
 static bool parse_state_char(char ch, uint8_t *state_out)
 {
     switch (ch) {
@@ -272,7 +320,6 @@ static bool parse_state_char(char ch, uint8_t *state_out)
     }
 }
 
-// 检查字符是否为允许出现在脱敏代号中的 ASCII 字母、数字或连字符。
 static bool is_safe_code_char(char ch)
 {
     return (ch >= 'A' && ch <= 'Z') ||
@@ -281,8 +328,20 @@ static bool is_safe_code_char(char ch)
            (ch == '-') || (ch == '_');
 }
 
-// 解析单条 "TOWER_SYNC v1 <CODE>:<STATE>:<MIN>,..." 协议帧。
-// 支持在带前缀日志或 HTTP 响应体的字符串中按子串定位 "TOWER_SYNC v1 "。
+// 根据代码自动推断默认动作类型（当协议未显式传第 4 段 role 时兜底）
+static uint8_t default_role_for_code(const char *code)
+{
+    if (!code) return TOWER_ROLE_CODE;
+    if (strncmp(code, "TRAE", 4) == 0) return TOWER_ROLE_WRITE;
+    if (strncmp(code, "CURS", 4) == 0) return TOWER_ROLE_CODE;
+    if (strncmp(code, "AIME", 4) == 0) return TOWER_ROLE_SEARCH;
+    if (strncmp(code, "MULT", 4) == 0) return TOWER_ROLE_TASK;
+    if (strncmp(code, "CHRM", 4) == 0) return TOWER_ROLE_DOC;
+    if (strncmp(code, "FEIS", 4) == 0) return TOWER_ROLE_CHAT;
+    if (strncmp(code, "TERM", 4) == 0) return TOWER_ROLE_TERM;
+    return TOWER_ROLE_TASK;
+}
+
 bool tower_model_parse_sync(
     tower_model_t *model,
     const char *line,
@@ -300,7 +359,6 @@ bool tower_model_parse_sync(
     memset(parsed, 0, sizeof(parsed));
 
     for (uint8_t idx = 0; idx < TOWER_SLOT_COUNT; idx++) {
-        // 1. 解析 CODE（1..7 个安全 ASCII 字符，直至 ':'）
         size_t code_len = 0;
         while (*cursor && *cursor != ':' && *cursor != ',' &&
                *cursor != '\r' && *cursor != '\n') {
@@ -314,17 +372,15 @@ bool tower_model_parse_sync(
         }
         if (code_len == 0 || *cursor != ':') return false;
         parsed[idx].code[code_len] = '\0';
-        cursor++; // 跳过第一个 ':'
+        cursor++;
 
-        // 2. 解析单字符状态码与第二个 ':'
         uint8_t st = TOWER_STATE_IDLE;
         if (!parse_state_char(*cursor, &st)) return false;
         parsed[idx].state = st;
         cursor++;
         if (*cursor != ':') return false;
-        cursor++; // 跳过第二个 ':'
+        cursor++;
 
-        // 3. 解析分钟数（1..999）
         if (*cursor < '0' || *cursor > '9') return false;
         uint32_t mins = 0;
         while (*cursor >= '0' && *cursor <= '9') {
@@ -335,6 +391,18 @@ bool tower_model_parse_sync(
         if (mins == 0) mins = 1;
         if (mins > 999U) mins = 999U;
         parsed[idx].minutes = (uint16_t)mins;
+
+        // 可选的第 4 字段 :ROLE (0..7)
+        parsed[idx].role = default_role_for_code(parsed[idx].code);
+        if (*cursor == ':') {
+            cursor++;
+            if (*cursor >= '0' && *cursor <= '7') {
+                parsed[idx].role = (uint8_t)(*cursor - '0');
+                cursor++;
+            } else {
+                return false;
+            }
+        }
 
         if (idx + 1U < TOWER_SLOT_COUNT) {
             if (*cursor != ',') return false;
@@ -350,7 +418,6 @@ bool tower_model_parse_sync(
     model->sync_seq++;
     tower_model_recompute_stage(model);
 
-    // 若新同步帧出现了新的头号紧急窗口（WAIT 或 DONE），自动把光标对准它，方便一键盲按 OK。
     uint8_t new_top = model->stage_slots[0];
     uint8_t new_top_state = model->slots[new_top].state;
     if ((new_top_state == TOWER_STATE_WAIT || new_top_state == TOWER_STATE_DONE) &&
@@ -361,7 +428,6 @@ bool tower_model_parse_sync(
     return true;
 }
 
-// 格式化发往 Mac 的控制指令行（以 '\n' 结尾）。
 bool tower_model_format_cmd(
     const tower_model_t *model,
     tower_action_t action,
@@ -393,7 +459,6 @@ bool tower_model_format_cmd(
     return written > 0 && (size_t)written < out_size;
 }
 
-// 提取以空格分隔的下一个字段，用于解析 TOWER_WIFI 指令。
 static const char *next_token(const char *cursor, char *out, size_t out_size)
 {
     while (*cursor == ' ' || *cursor == '\t') cursor++;
@@ -410,7 +475,6 @@ static const char *next_token(const char *cursor, char *out, size_t out_size)
     return len > 0 ? cursor : NULL;
 }
 
-// 解析串口配网指令："TOWER_WIFI <ssid> <password> <url>"
 bool tower_model_parse_wifi_cmd(
     const char *line,
     char *ssid_out,

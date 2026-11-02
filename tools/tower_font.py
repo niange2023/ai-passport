@@ -28,10 +28,13 @@ ASCII_RANGES = ((0x20, 0x7E),)
 # Extra characters that may be formatted dynamically at runtime
 EXTRA_UI_CHARS = (
     "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
-    "!✓★●▶:#[]().+-_/ "
+    "!?✓★●▶:·#[]().+-_/ "
     "总控演示待拍板收菜当前窗运行中闲置上下选切口双击已双模实时联动状态"
     "串口直连同步中局域网轮询接收帧配置网络未使只需在即可零泄密安全保证"
     "仅传输应用代号与态枚举绝不显示任何文档或任务名称单击立即长按返回正请求保存"
+    "写代码文章看跑任务查资料做设计聊协作脚本浏览器飞书终端拾页工具"
+    "等你确认完了正在用后台着休息中有个工位找看板全部正常过去看完电脑"
+    "从刷新次画面连上方式当前数据线颜色含义说明橙绿黄蓝"
 )
 
 

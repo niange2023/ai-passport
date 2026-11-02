@@ -1,10 +1,10 @@
 // main/tower_ui.c
-// 「3-B 双焦像素总控台 (Command Tower)」LVGL 240x320 竖屏界面实现。
+// 「AI 工位看板 (6 工位大字人话版)」LVGL 240x320 竖屏界面实现。
 //
 // 严格遵守运行时规则：
-// - 所有 LVGL 对象创建与更新均在持有 bsp_lvgl_lock() 的上下文中调用。
-// - 重建 screen 前先清空引用，使用 lv_screen_load_anim(..., true) 自动释放旧 screen。
-// - 所有文本标签显式绑定包含完整中文与 ASCII 字形的 tower_cjk_12 / tower_cjk_14 字体。
+// - 所有 LVGL 对象在 tower_ui_init() 中一次性创建，tower_ui_render() 原地更新属性与文本，
+//   运行期零 lv_obj_create / lv_obj_delete。
+// - 一屏展示 2 列 × 3 行共 6 个大像素工位，直接显示「工具名·动作」与「等你确认/跑完了!/正在用/后台跑着/休息中」。
 #include "tower_ui.h"
 
 #include <stdio.h>
@@ -12,7 +12,6 @@
 
 #include "bsp_battery.h"
 
-// 调色板定义（深色像素总控台主题，高对比度区分五种窗口状态）
 #define COLOR_BG_MAIN       0x161E1B
 #define COLOR_BG_BAR        0x0F1513
 #define COLOR_BG_PANEL      0x202A25
@@ -21,7 +20,6 @@
 #define COLOR_TEXT_MUTED    0x78887F
 #define COLOR_CURSOR_GOLD   0xFFE66D
 
-// 五种窗口状态的主题色（边框高亮色 & 卡片底色）
 #define COLOR_WAIT_BORDER   0xEB5F37
 #define COLOR_WAIT_BG       0x3E1F1A
 #define COLOR_DONE_BORDER   0x41C373
@@ -33,13 +31,11 @@
 #define COLOR_IDLE_BORDER   0x46504B
 #define COLOR_IDLE_BG       0x1F2522
 
-// 像素小人及工位家具颜色
 #define COLOR_DESK_WOOD     0x947E56
 #define COLOR_MONITOR_CASE  0x2A322E
 #define COLOR_SKIN          0xE0BC8E
 #define COLOR_HAIR          0x3E4A3C
 
-// 根据状态枚举返回边框/强调色
 static uint32_t state_accent_color(uint8_t state)
 {
     switch ((tower_state_t)state) {
@@ -57,7 +53,6 @@ static uint32_t state_accent_color(uint8_t state)
     }
 }
 
-// 根据状态枚举返回卡片背景色
 static uint32_t state_bg_color(uint8_t state)
 {
     switch ((tower_state_t)state) {
@@ -75,25 +70,6 @@ static uint32_t state_bg_color(uint8_t state)
     }
 }
 
-// 根据状态枚举返回简短中文状态词
-static const char *state_short_label(uint8_t state)
-{
-    switch ((tower_state_t)state) {
-    case TOWER_STATE_WAIT:
-        return "!等拍板";
-    case TOWER_STATE_DONE:
-        return "✓待收菜";
-    case TOWER_STATE_ACTIVE:
-        return "★当前窗";
-    case TOWER_STATE_RUN:
-        return "●运行中";
-    case TOWER_STATE_IDLE:
-    default:
-        return "闲置";
-    }
-}
-
-// 创建无内边距、不可滚动的矩形色块（用于卡片容器与像素画图元）
 static lv_obj_t *pixel_box(
     lv_obj_t *parent,
     int x,
@@ -121,7 +97,6 @@ static lv_obj_t *pixel_box(
     return obj;
 }
 
-// 创建显式指定中文字体的单行或自动换行标签
 static lv_obj_t *text_label(
     lv_obj_t *parent,
     const char *text,
@@ -144,7 +119,16 @@ static lv_obj_t *text_label(
     return lbl;
 }
 
-// 刷新右上角电池电量图标与百分比（读取 bsp_battery_soc，-1 时降级显示 "--"）
+static void set_visible(lv_obj_t *obj, bool visible)
+{
+    if (!obj) return;
+    if (visible) {
+        lv_obj_remove_flag(obj, LV_OBJ_FLAG_HIDDEN);
+    } else {
+        lv_obj_add_flag(obj, LV_OBJ_FLAG_HIDDEN);
+    }
+}
+
 static void refresh_battery_widget(tower_ui_t *ui)
 {
     if (!ui || !ui->battery_fill || !ui->battery_label) return;
@@ -172,379 +156,265 @@ static void on_battery_timer(lv_timer_t *timer)
     refresh_battery_widget(ui);
 }
 
-// 绘制顶部状态栏 (240 x 24)
-static void draw_top_bar(
+// 一次性创建单个大像素工位卡片 (108 x 84) 的子控件
+static void init_desk_widgets(
     tower_ui_t *ui,
-    lv_obj_t *screen,
-    const tower_model_t *model
+    lv_obj_t *parent,
+    tower_desk_widgets_t *w,
+    int x,
+    int y
 )
 {
-    lv_obj_t *bar = pixel_box(screen, 0, 0, 240, 24, COLOR_BG_BAR, 0, 0, 0);
-
-    const char *link_tag = "演示";
-    if (model->link_mode == TOWER_LINK_USB) {
-        link_tag = "USB";
-    } else if (model->link_mode == TOWER_LINK_WIFI) {
-        link_tag = "WiFi";
-    }
-
-    char left_buf[48];
-    snprintf(
-        left_buf,
-        sizeof(left_buf),
-        "总控[%s] !%u ✓%u",
-        link_tag,
-        (unsigned)model->wait_count,
-        (unsigned)model->done_count
+    w->card = pixel_box(parent, x, y, 108, 84, COLOR_RUN_BG, 8, COLOR_RUN_BORDER, 2);
+    w->header_label = text_label(
+        w->card, "Trae·写文章", ui->font_small, COLOR_TEXT_MAIN, 6, 3, 96, LV_TEXT_ALIGN_LEFT
     );
-    text_label(bar, left_buf, ui->font_small, COLOR_TEXT_MAIN, 12, 4, 156, LV_TEXT_ALIGN_LEFT);
 
-    // 右上角电量显示（避开圆角裁剪区域 x <= 226）
-    lv_obj_t *bat_shell = pixel_box(bar, 170, 6, 18, 11, COLOR_BG_PANEL, 2, COLOR_TEXT_SUB, 1);
-    pixel_box(bar, 188, 9, 2, 5, COLOR_TEXT_SUB, 0, 0, 0);
-    ui->battery_fill = pixel_box(bat_shell, 1, 1, 12, 7, COLOR_DONE_BORDER, 1, 0, 0);
-    ui->battery_label = text_label(
-        bar, "--", ui->font_small, COLOR_TEXT_SUB, 192, 4, 36, LV_TEXT_ALIGN_LEFT
-    );
-    refresh_battery_widget(ui);
-}
-
-// 在上屏大工位卡片内绘制动态像素小人与工位家具（相对父卡片坐标）
-static void draw_stage_pixel_scene(
-    tower_ui_t *ui,
-    lv_obj_t *card,
-    const tower_slot_t *slot,
-    uint8_t anim_tick
-)
-{
-    uint32_t accent = state_accent_color(slot->state);
-    bool pulse = (anim_tick & 1U) != 0;
-
-    // 像素工位地板线与办公桌 (x=8..100, y=74..79)
-    pixel_box(card, 8, 74, 92, 5, COLOR_DESK_WOOD, 1, 0, 0);
-
-    // 右侧像素显示器 (x=58..92, y=46..72)
-    pixel_box(card, 58, 46, 34, 26, COLOR_MONITOR_CASE, 2, COLOR_TEXT_MUTED, 1);
-    pixel_box(card, 61, 49, 28, 18, accent, 1, 0, 0);
-    // 显示器屏幕内动态代码扫描线
-    int scan_y = pulse ? 53 : 59;
-    pixel_box(card, 64, scan_y, 20, 3, COLOR_TEXT_MAIN, 0, 0, 0);
-    // 显示器支架
-    pixel_box(card, 72, 71, 6, 4, COLOR_TEXT_MUTED, 0, 0, 0);
+    // 办公桌面与右侧像素显示器
+    w->desk = pixel_box(w->card, 8, 53, 92, 4, COLOR_DESK_WOOD, 1, 0, 0);
+    w->monitor_case = pixel_box(w->card, 60, 30, 32, 21, COLOR_MONITOR_CASE, 2, COLOR_TEXT_MUTED, 1);
+    w->monitor_screen = pixel_box(w->card, 63, 33, 26, 14, COLOR_RUN_BORDER, 1, 0, 0);
+    w->monitor_scan = pixel_box(w->card, 66, 36, 18, 3, COLOR_TEXT_MAIN, 0, 0, 0);
+    w->monitor_stand = pixel_box(w->card, 73, 50, 6, 4, COLOR_TEXT_MUTED, 0, 0, 0);
 
     // 左侧像素打工人小人
-    if (slot->state == TOWER_STATE_IDLE) {
-        // 闲置状态：趴在桌面上休息 + 浮动 "z"
-        pixel_box(card, 22, 60, 20, 14, COLOR_IDLE_BORDER, 2, 0, 0);
-        pixel_box(card, 24, 54, 16, 9, COLOR_SKIN, 2, 0, 0);
-        pixel_box(card, 23, 50, 18, 5, COLOR_HAIR, 1, 0, 0);
-        text_label(
-            card,
-            pulse ? "zZ" : "z",
-            ui->font_small,
-            COLOR_TEXT_MUTED,
-            42,
-            34,
-            20,
-            LV_TEXT_ALIGN_LEFT
-        );
-        return;
-    }
+    w->body = pixel_box(w->card, 19, 40, 22, 14, COLOR_RUN_BORDER, 2, 0, 0);
+    w->head = pixel_box(w->card, 22, 29, 16, 11, COLOR_SKIN, 2, 0, 0);
+    w->hair = pixel_box(w->card, 21, 25, 18, 5, COLOR_HAIR, 1, 0, 0);
+    w->eye = pixel_box(w->card, 32, 32, 3, 3, COLOR_BG_BAR, 0, 0, 0);
+    w->arm_left = pixel_box(w->card, 42, 49, 5, 4, COLOR_SKIN, 2, 0, 0);
+    w->hand_right = pixel_box(w->card, 49, 49, 5, 4, COLOR_SKIN, 2, 0, 0);
 
-    // 正常坐姿/站姿头部与头发
-    int head_y = (slot->state == TOWER_STATE_WAIT || slot->state == TOWER_STATE_DONE)
-        ? (pulse ? 34 : 36)
-        : 38;
-    pixel_box(card, 23, head_y - 5, 20, 6, COLOR_HAIR, 1, 0, 0);
-    pixel_box(card, 24, head_y, 18, 14, COLOR_SKIN, 2, 0, 0);
-    // 像素眼睛
-    pixel_box(card, 35, head_y + 4, 3, 3, COLOR_BG_BAR, 0, 0, 0);
-    // 身体衬衫（颜色跟随状态）
-    pixel_box(card, 21, head_y + 14, 24, 22, accent, 2, 0, 0);
+    // 紧急气泡与闲置睡眠符号
+    w->bubble_box = pixel_box(w->card, 41, 20, 18, 16, COLOR_WAIT_BORDER, 3, COLOR_TEXT_MAIN, 1);
+    w->bubble_label = text_label(
+        w->bubble_box, "?", ui->font_small, COLOR_TEXT_MAIN, 0, 0, 16, LV_TEXT_ALIGN_CENTER
+    );
+    w->sleep_label = text_label(
+        w->card, "zZ", ui->font_small, COLOR_TEXT_MUTED, 41, 26, 22, LV_TEXT_ALIGN_LEFT
+    );
 
-    if (slot->state == TOWER_STATE_WAIT || slot->state == TOWER_STATE_DONE) {
-        // 紧急状态（等拍板 / 待收菜）：高举左手上下挥动 + 头顶气泡
-        int arm_y = pulse ? (head_y - 2) : (head_y + 4);
-        pixel_box(card, 13, arm_y, 7, 16, COLOR_SKIN, 2, 0, 0);
-        const char *bubble = (slot->state == TOWER_STATE_WAIT) ? "!" : "OK";
-        lv_obj_t *tag = pixel_box(card, 44, 26, 22, 16, accent, 3, COLOR_TEXT_MAIN, 1);
-        text_label(tag, bubble, ui->font_small, COLOR_TEXT_MAIN, 0, 0, 20, LV_TEXT_ALIGN_CENTER);
-    } else {
-        // 运行中 / 当前焦点：双手在桌面上交替敲键盘
-        int left_hand_y = pulse ? 67 : 70;
-        int right_hand_y = pulse ? 70 : 67;
-        pixel_box(card, 43, left_hand_y, 6, 5, COLOR_SKIN, 1, 0, 0);
-        pixel_box(card, 50, right_hand_y, 6, 5, COLOR_SKIN, 1, 0, 0);
-    }
+    // 底部中文状态胶囊条
+    w->pill = pixel_box(w->card, 5, 60, 98, 19, COLOR_BG_BAR, 4, 0, 0);
+    w->status_label = text_label(
+        w->pill, "后台跑着", ui->font_small, COLOR_TEXT_MAIN, 2, 1, 94, LV_TEXT_ALIGN_CENTER
+    );
 }
 
-// 绘制上屏单个放大像素工位卡 (108 x 112)
-static void draw_stage_card(
-    tower_ui_t *ui,
-    lv_obj_t *screen,
-    int x,
-    int y,
+// 原地更新单个像素工位卡片的状态、动画与中文文字
+static void update_desk_widgets(
+    tower_desk_widgets_t *w,
     uint8_t slot_idx,
     const tower_model_t *model
 )
 {
     const tower_slot_t *slot = &model->slots[slot_idx];
     bool is_selected = (slot_idx == model->selected_slot);
-    uint32_t border_col = is_selected ? COLOR_CURSOR_GOLD : state_accent_color(slot->state);
-    int border_w = is_selected ? 3 : 2;
+    uint32_t accent = state_accent_color(slot->state);
+    uint32_t border_col = is_selected ? COLOR_CURSOR_GOLD : accent;
+    bool is_urgent = (slot->state == TOWER_STATE_WAIT || slot->state == TOWER_STATE_DONE);
+    bool pulse = is_urgent && ((model->anim_tick & 1U) != 0);
 
-    lv_obj_t *card = pixel_box(
-        screen, x, y, 108, 112, state_bg_color(slot->state), 8, border_col, border_w
-    );
+    lv_obj_set_style_bg_color(w->card, lv_color_hex(state_bg_color(slot->state)), 0);
+    lv_obj_set_style_border_color(w->card, lv_color_hex(border_col), 0);
+    lv_obj_set_style_border_width(w->card, is_selected ? 3 : 2, 0);
 
-    // 顶部工位编号与脱敏代号（例如 "#01 AIME"）
-    char header_buf[24];
+    char title_raw[24];
+    tower_model_format_title(slot, title_raw, sizeof(title_raw));
+    char header_buf[32];
     snprintf(
         header_buf,
         sizeof(header_buf),
-        "%s#%02u %s",
+        "%s%s",
         is_selected ? "▶" : "",
-        (unsigned)(slot_idx + 1U),
-        slot->code
+        title_raw
     );
-    text_label(
-        card,
-        header_buf,
-        ui->font_small,
-        is_selected ? COLOR_CURSOR_GOLD : COLOR_TEXT_MAIN,
-        6,
-        4,
-        96,
-        LV_TEXT_ALIGN_LEFT
+    lv_label_set_text(w->header_label, header_buf);
+    lv_obj_set_style_text_color(
+        w->header_label,
+        lv_color_hex(is_selected ? COLOR_CURSOR_GOLD : COLOR_TEXT_MAIN),
+        0
     );
 
-    // 中部像素小人与工位动画
-    draw_stage_pixel_scene(ui, card, slot, model->anim_tick);
+    // 只有需要用户注意/操作的紧急窗口才有屏幕闪烁与扫描线动画；其余窗口完全静止
+    lv_obj_set_style_bg_color(
+        w->monitor_screen,
+        lv_color_hex(pulse ? COLOR_CURSOR_GOLD : accent),
+        0
+    );
+    lv_obj_set_pos(w->monitor_scan, 66, pulse ? 34 : 39);
 
-    // 底部状态胶囊条
+    if (slot->state == TOWER_STATE_IDLE) {
+        // 休息中：完全静止，无任何动画
+        lv_obj_set_pos(w->body, 20, 42);
+        lv_obj_set_size(w->body, 18, 11);
+        lv_obj_set_style_bg_color(w->body, lv_color_hex(COLOR_IDLE_BORDER), 0);
+
+        lv_obj_set_pos(w->head, 22, 36);
+        lv_obj_set_size(w->head, 15, 8);
+        lv_obj_set_pos(w->hair, 21, 33);
+        lv_obj_set_size(w->hair, 17, 4);
+
+        set_visible(w->eye, false);
+        set_visible(w->arm_left, false);
+        set_visible(w->hand_right, false);
+        set_visible(w->bubble_box, false);
+        set_visible(w->sleep_label, true);
+        lv_label_set_text(w->sleep_label, "zZ");
+    } else if (is_urgent) {
+        // 需要用户注意和操作的窗口（等你确认 / 跑完了!）：
+        // 小人起立跳跃 + 大幅度高举手臂左右挥舞亮色手掌 + 气泡跳动闪烁
+        int head_y = pulse ? 23 : 28;
+        lv_obj_set_pos(w->hair, 21, head_y - 4);
+        lv_obj_set_size(w->hair, 18, 5);
+        lv_obj_set_pos(w->head, 22, head_y);
+        lv_obj_set_size(w->head, 16, 11);
+        lv_obj_set_pos(w->eye, 32, head_y + 3);
+        set_visible(w->eye, true);
+
+        lv_obj_set_pos(w->body, 19, head_y + 11);
+        lv_obj_set_size(w->body, 22, pulse ? 19 : 15);
+        lv_obj_set_style_bg_color(w->body, lv_color_hex(accent), 0);
+        set_visible(w->sleep_label, false);
+
+        // 高举过头顶的大手臂 (arm_left) + 醒目挥舞的大手掌/信号牌 (hand_right)
+        lv_obj_set_pos(w->arm_left, pulse ? 9 : 4, pulse ? 18 : 25);
+        lv_obj_set_size(w->arm_left, 8, pulse ? 22 : 18);
+        lv_obj_set_style_bg_color(w->arm_left, lv_color_hex(COLOR_SKIN), 0);
+        set_visible(w->arm_left, true);
+
+        lv_obj_set_pos(w->hand_right, pulse ? 6 : 2, pulse ? 14 : 20);
+        lv_obj_set_size(w->hand_right, 13, 8);
+        lv_obj_set_style_bg_color(
+            w->hand_right,
+            lv_color_hex(pulse ? COLOR_CURSOR_GOLD : COLOR_TEXT_MAIN),
+            0
+        );
+        set_visible(w->hand_right, true);
+
+        // 醒目跳动的 ? / ✓ 提示气泡
+        set_visible(w->bubble_box, true);
+        lv_obj_set_pos(w->bubble_box, 41, pulse ? 16 : 22);
+        lv_obj_set_style_bg_color(
+            w->bubble_box,
+            lv_color_hex(pulse ? COLOR_CURSOR_GOLD : accent),
+            0
+        );
+        lv_obj_set_style_text_color(
+            w->bubble_label,
+            lv_color_hex(pulse ? COLOR_BG_BAR : COLOR_TEXT_MAIN),
+            0
+        );
+        lv_label_set_text(
+            w->bubble_label,
+            (slot->state == TOWER_STATE_WAIT) ? "?" : "✓"
+        );
+    } else {
+        // 无需注意的正常工作窗口（正在用 / 后台跑着）：完全静止，双手固定在桌面
+        int head_y = 29;
+        lv_obj_set_pos(w->hair, 21, head_y - 4);
+        lv_obj_set_size(w->hair, 18, 5);
+        lv_obj_set_pos(w->head, 22, head_y);
+        lv_obj_set_size(w->head, 16, 11);
+        lv_obj_set_pos(w->eye, 32, head_y + 3);
+        set_visible(w->eye, true);
+
+        lv_obj_set_pos(w->body, 19, head_y + 11);
+        lv_obj_set_size(w->body, 22, 14);
+        lv_obj_set_style_bg_color(w->body, lv_color_hex(accent), 0);
+        set_visible(w->sleep_label, false);
+
+        lv_obj_set_pos(w->arm_left, 42, 49);
+        lv_obj_set_size(w->arm_left, 5, 4);
+        lv_obj_set_style_bg_color(w->arm_left, lv_color_hex(COLOR_SKIN), 0);
+        lv_obj_set_pos(w->hand_right, 49, 49);
+        lv_obj_set_size(w->hand_right, 5, 4);
+        lv_obj_set_style_bg_color(w->hand_right, lv_color_hex(COLOR_SKIN), 0);
+        set_visible(w->arm_left, true);
+        set_visible(w->hand_right, true);
+        set_visible(w->bubble_box, false);
+    }
+
     uint32_t pill_bg = (slot->state == TOWER_STATE_WAIT || slot->state == TOWER_STATE_DONE)
-        ? state_accent_color(slot->state)
+        ? accent
         : COLOR_BG_BAR;
-    lv_obj_t *pill = pixel_box(card, 5, 86, 98, 20, pill_bg, 4, 0, 0);
+    lv_obj_set_style_bg_color(w->pill, lv_color_hex(pill_bg), 0);
 
-    char status_buf[32];
-    snprintf(
-        status_buf,
-        sizeof(status_buf),
-        "%s %um",
-        state_short_label(slot->state),
-        (unsigned)slot->minutes
-    );
-    text_label(
-        pill,
-        status_buf,
-        ui->font_small,
-        COLOR_TEXT_MAIN,
-        2,
-        2,
-        94,
-        LV_TEXT_ALIGN_CENTER
-    );
-}
-
-// 绘制下屏 4x3 十二窗口全景状态矩阵 (y = 143..291)
-static void draw_matrix_grid(
-    tower_ui_t *ui,
-    lv_obj_t *screen,
-    const tower_model_t *model
-)
-{
-    const int start_x = 8;
-    const int start_y = 143;
-    const int cell_w = 53;
-    const int cell_h = 46;
-    const int gap_x = 4;
-    const int gap_y = 5;
-
-    for (uint8_t idx = 0; idx < TOWER_SLOT_COUNT; idx++) {
-        int row = idx / 4;
-        int col = idx % 4;
-        int cx = start_x + col * (cell_w + gap_x);
-        int cy = start_y + row * (cell_h + gap_y);
-
-        const tower_slot_t *slot = &model->slots[idx];
-        bool is_sel = (idx == model->selected_slot);
-        uint32_t accent = state_accent_color(slot->state);
-        uint32_t border_col = is_sel ? COLOR_CURSOR_GOLD : accent;
-        int border_w = is_sel ? 2 : 1;
-
-        lv_obj_t *cell = pixel_box(
-            screen, cx, cy, cell_w, cell_h, state_bg_color(slot->state), 5, border_col, border_w
-        );
-
-        // 左上角状态小圆点 + 工位代号
-        pixel_box(cell, 4, 7, 5, 5, accent, 2, 0, 0);
-        text_label(
-            cell,
-            slot->code,
-            ui->font_small,
-            is_sel ? COLOR_CURSOR_GOLD : COLOR_TEXT_MAIN,
-            11,
-            2,
-            40,
-            LV_TEXT_ALIGN_LEFT
-        );
-
-        // 第二行：状态符号 + 持续分钟数
-        const char *sym = "";
-        if (slot->state == TOWER_STATE_WAIT) sym = "!";
-        else if (slot->state == TOWER_STATE_DONE) sym = "✓";
-        else if (slot->state == TOWER_STATE_ACTIVE) sym = "★";
-        else if (slot->state == TOWER_STATE_RUN) sym = "●";
-
-        char time_buf[16];
-        snprintf(time_buf, sizeof(time_buf), "%s%um", sym, (unsigned)slot->minutes);
-        uint32_t time_col = (slot->state == TOWER_STATE_IDLE) ? COLOR_TEXT_MUTED : accent;
-        if (slot->state == TOWER_STATE_WAIT || slot->state == TOWER_STATE_DONE) {
-            time_col = COLOR_TEXT_MAIN;
-        }
-        text_label(
-            cell,
-            time_buf,
-            ui->font_small,
-            time_col,
-            4,
-            23,
-            45,
-            LV_TEXT_ALIGN_CENTER
-        );
+    uint32_t status_col = COLOR_TEXT_MAIN;
+    if (slot->state == TOWER_STATE_IDLE) {
+        status_col = COLOR_TEXT_MUTED;
+    } else if (slot->state == TOWER_STATE_ACTIVE) {
+        status_col = COLOR_CURSOR_GOLD;
     }
-}
-
-// 绘制底部操作提示或瞬态反馈栏 (y = 296..320)
-static void draw_footer_bar(
-    tower_ui_t *ui,
-    lv_obj_t *screen,
-    const tower_model_t *model
-)
-{
-    lv_obj_t *footer = pixel_box(screen, 0, 296, 240, 24, COLOR_BG_BAR, 0, 0, 0);
-
-    if (model->toast_ticks > 0 && model->toast_text[0] != '\0') {
-        text_label(
-            footer,
-            model->toast_text,
-            ui->font_small,
-            COLOR_CURSOR_GOLD,
-            14,
-            4,
-            212,
-            LV_TEXT_ALIGN_CENTER
-        );
-    } else {
-        text_label(
-            footer,
-            "上下:选窗 OK:切窗口 双击:已收",
-            ui->font_small,
-            COLOR_TEXT_SUB,
-            14,
-            4,
-            212,
-            LV_TEXT_ALIGN_CENTER
-        );
-    }
-}
-
-// 绘制长按 OK 进入的「连接与同步状态页」
-static void draw_link_screen(
-    tower_ui_t *ui,
-    lv_obj_t *screen,
-    const tower_model_t *model
-)
-{
-    draw_top_bar(ui, screen, model);
-
-    lv_obj_t *card1 = pixel_box(
-        screen, 10, 32, 220, 82, COLOR_BG_PANEL, 8, COLOR_RUN_BORDER, 2
-    );
-    text_label(card1, "双模实时联动状态", ui->font_body, COLOR_CURSOR_GOLD, 10, 6, 200, LV_TEXT_ALIGN_LEFT);
-
-    const char *mode_desc = "当前：内置脱敏演示快照";
-    if (model->link_mode == TOWER_LINK_USB) {
-        mode_desc = "当前：USB-C 串口直连同步中";
-    } else if (model->link_mode == TOWER_LINK_WIFI) {
-        mode_desc = "当前：Wi-Fi 局域网轮询同步中";
-    }
-    text_label(card1, mode_desc, ui->font_small, COLOR_TEXT_MAIN, 10, 32, 200, LV_TEXT_ALIGN_LEFT);
-
-    char seq_buf[48];
-    snprintf(seq_buf, sizeof(seq_buf), "已接收同步帧：%lu 帧", (unsigned long)model->sync_seq);
-    text_label(card1, seq_buf, ui->font_small, COLOR_TEXT_SUB, 10, 54, 200, LV_TEXT_ALIGN_LEFT);
-
-    lv_obj_t *card2 = pixel_box(
-        screen, 10, 122, 220, 92, COLOR_BG_PANEL, 8, COLOR_DONE_BORDER, 1
-    );
-    text_label(card2, "Wi-Fi 局域网配置", ui->font_body, COLOR_DONE_BORDER, 10, 6, 200, LV_TEXT_ALIGN_LEFT);
-    if (ui->wifi_cfg && ui->wifi_cfg->configured) {
-        char ssid_buf[48];
-        snprintf(ssid_buf, sizeof(ssid_buf), "网络: %.24s", ui->wifi_cfg->ssid);
-        text_label(card2, ssid_buf, ui->font_small, COLOR_TEXT_MAIN, 10, 32, 200, LV_TEXT_ALIGN_LEFT);
-        text_label(card2, ui->wifi_cfg->url, ui->font_small, COLOR_TEXT_SUB, 10, 54, 200, LV_TEXT_ALIGN_LEFT);
-    } else {
-        text_label(card2, "状态: 未配置 Wi-Fi (使用 USB)", ui->font_small, COLOR_TEXT_MAIN, 10, 32, 200, LV_TEXT_ALIGN_LEFT);
-        text_label(card2, "Mac运行 passport_tower.py 即可", ui->font_small, COLOR_TEXT_SUB, 10, 54, 200, LV_TEXT_ALIGN_LEFT);
-    }
-
-    lv_obj_t *card3 = pixel_box(
-        screen, 10, 222, 220, 66, COLOR_BG_PANEL, 8, COLOR_IDLE_BORDER, 1
-    );
-    text_label(card3, "零泄密安全保证", ui->font_small, COLOR_CURSOR_GOLD, 10, 6, 200, LV_TEXT_ALIGN_LEFT);
-    text_label(card3, "仅传输应用代号与5态枚举", ui->font_small, COLOR_TEXT_SUB, 10, 26, 200, LV_TEXT_ALIGN_LEFT);
-    text_label(card3, "绝不显示任何文档或任务名称", ui->font_small, COLOR_TEXT_SUB, 10, 44, 200, LV_TEXT_ALIGN_LEFT);
-
-    lv_obj_t *footer = pixel_box(screen, 0, 296, 240, 24, COLOR_BG_BAR, 0, 0, 0);
-    text_label(
-        footer,
-        "单击OK:立即同步  长按OK:返回",
-        ui->font_small,
-        COLOR_TEXT_SUB,
-        14,
-        4,
-        212,
-        LV_TEXT_ALIGN_CENTER
-    );
+    lv_label_set_text(w->status_label, tower_model_state_text(slot->state));
+    lv_obj_set_style_text_color(w->status_label, lv_color_hex(status_col), 0);
 }
 
 void tower_ui_render(tower_ui_t *ui, const tower_model_t *model)
 {
-    if (!ui || !model) return;
+    if (!ui || !model || !ui->screen) return;
 
-    lv_obj_t *screen = lv_obj_create(NULL);
-    lv_obj_remove_flag(screen, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_set_style_bg_color(screen, lv_color_hex(COLOR_BG_MAIN), 0);
-    lv_obj_set_style_bg_opa(screen, LV_OPA_COVER, 0);
-    lv_obj_set_style_border_width(screen, 0, 0);
-    lv_obj_set_style_pad_all(screen, 0, 0);
+    // 1. 顶部栏：直接用中文告诉你有几个工位在找你
+    uint8_t urgent_total = (uint8_t)(model->wait_count + model->done_count);
+    char top_buf[48];
+    if (urgent_total > 0) {
+        snprintf(top_buf, sizeof(top_buf), "有 %u 个工位在找你", (unsigned)urgent_total);
+        lv_obj_set_style_text_color(ui->top_title_label, lv_color_hex(COLOR_CURSOR_GOLD), 0);
+    } else {
+        snprintf(top_buf, sizeof(top_buf), "AI 工位看板 · 全部正常");
+        lv_obj_set_style_text_color(ui->top_title_label, lv_color_hex(COLOR_TEXT_MAIN), 0);
+    }
+    lv_label_set_text(ui->top_title_label, top_buf);
+    refresh_battery_widget(ui);
 
-    ui->battery_fill = NULL;
-    ui->battery_label = NULL;
-
+    // 2. 连接说明页
     if (model->screen == TOWER_SCREEN_LINK) {
-        draw_link_screen(ui, screen, model);
-    } else {
-        draw_top_bar(ui, screen, model);
+        set_visible(ui->main_layer, false);
+        set_visible(ui->link_layer, true);
 
-        uint8_t left_slot = 0;
-        uint8_t right_slot = 1;
-        tower_model_get_stage_pair(model, &left_slot, &right_slot);
+        const char *mode_desc = "状态：内置演示画面";
+        if (model->link_mode == TOWER_LINK_USB) {
+            mode_desc = "状态：已通过 USB 连上电脑";
+        } else if (model->link_mode == TOWER_LINK_WIFI) {
+            mode_desc = "状态：已通过 Wi-Fi 连上电脑";
+        }
+        lv_label_set_text(ui->link_mode_label, mode_desc);
 
-        draw_stage_card(ui, screen, 8, 26, left_slot, model);
-        draw_stage_card(ui, screen, 124, 26, right_slot, model);
-        draw_matrix_grid(ui, screen, model);
-        draw_footer_bar(ui, screen, model);
+        char seq_buf[48];
+        snprintf(seq_buf, sizeof(seq_buf), "已同步刷新：%lu 次", (unsigned long)model->sync_seq);
+        lv_label_set_text(ui->link_seq_label, seq_buf);
+
+        if (ui->wifi_cfg && ui->wifi_cfg->configured) {
+            char ssid_buf[48];
+            snprintf(ssid_buf, sizeof(ssid_buf), "网络: %.24s", ui->wifi_cfg->ssid);
+            lv_label_set_text(ui->link_ssid_label, ssid_buf);
+            lv_label_set_text(ui->link_url_label, ui->wifi_cfg->url);
+        } else {
+            lv_label_set_text(ui->link_ssid_label, "当前使用 USB 数据线同步");
+            lv_label_set_text(ui->link_url_label, "电脑运行 passport_tower.py");
+        }
+
+        lv_label_set_text(ui->footer_label, "按OK:立即刷新  长按OK:返回");
+        lv_obj_set_style_text_color(ui->footer_label, lv_color_hex(COLOR_TEXT_SUB), 0);
+        return;
     }
 
-    if (ui->screen) {
-        lv_screen_load_anim(screen, LV_SCR_LOAD_ANIM_NONE, 0, 0, true);
-    } else {
-        lv_screen_load(screen);
+    set_visible(ui->link_layer, false);
+    set_visible(ui->main_layer, true);
+
+    // 3. 更新 2 列 × 3 行共 6 个大像素工位
+    for (uint8_t idx = 0; idx < TOWER_SLOT_COUNT; idx++) {
+        update_desk_widgets(&ui->desks[idx], idx, model);
     }
-    ui->screen = screen;
+
+    // 4. 底部操作栏
+    if (model->toast_ticks > 0 && model->toast_text[0] != '\0') {
+        lv_label_set_text(ui->footer_label, model->toast_text);
+        lv_obj_set_style_text_color(ui->footer_label, lv_color_hex(COLOR_CURSOR_GOLD), 0);
+    } else {
+        lv_label_set_text(ui->footer_label, "上下:选工位  OK:切过去  双击:已看");
+        lv_obj_set_style_text_color(ui->footer_label, lv_color_hex(COLOR_TEXT_SUB), 0);
+    }
 }
 
 void tower_ui_init(
@@ -560,6 +430,77 @@ void tower_ui_init(
     ui->font_small = font_small;
     ui->font_body = font_body;
     ui->wifi_cfg = wifi_cfg;
+
+    lv_obj_t *screen = lv_obj_create(NULL);
+    lv_obj_remove_flag(screen, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_bg_color(screen, lv_color_hex(COLOR_BG_MAIN), 0);
+    lv_obj_set_style_bg_opa(screen, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(screen, 0, 0);
+    lv_obj_set_style_pad_all(screen, 0, 0);
+    ui->screen = screen;
+
+    // 顶部状态栏 (0..24px)
+    lv_obj_t *bar = pixel_box(screen, 0, 0, 240, 24, COLOR_BG_BAR, 0, 0, 0);
+    ui->top_title_label = text_label(
+        bar, "有 2 个工位在找你", ui->font_small, COLOR_CURSOR_GOLD, 12, 4, 156, LV_TEXT_ALIGN_LEFT
+    );
+    lv_obj_t *bat_shell = pixel_box(bar, 170, 6, 18, 11, COLOR_BG_PANEL, 2, COLOR_TEXT_SUB, 1);
+    pixel_box(bar, 188, 9, 2, 5, COLOR_TEXT_SUB, 0, 0, 0);
+    ui->battery_fill = pixel_box(bat_shell, 1, 1, 12, 7, COLOR_DONE_BORDER, 1, 0, 0);
+    ui->battery_label = text_label(
+        bar, "--", ui->font_small, COLOR_TEXT_SUB, 192, 4, 36, LV_TEXT_ALIGN_LEFT
+    );
+
+    // 主视图层：2 列 × 3 行共 6 个大像素工位 (24..296px)
+    ui->main_layer = pixel_box(screen, 0, 24, 240, 272, COLOR_BG_MAIN, 0, 0, 0);
+    for (uint8_t idx = 0; idx < TOWER_SLOT_COUNT; idx++) {
+        int row = idx / 2;
+        int col = idx % 2;
+        int cx = 8 + col * 116;
+        int cy = 4 + row * 89;
+        init_desk_widgets(ui, ui->main_layer, &ui->desks[idx], cx, cy);
+    }
+
+    // 连接说明页层（默认隐藏）
+    ui->link_layer = pixel_box(screen, 0, 24, 240, 272, COLOR_BG_MAIN, 0, 0, 0);
+    lv_obj_t *card1 = pixel_box(ui->link_layer, 10, 8, 220, 82, COLOR_BG_PANEL, 8, COLOR_RUN_BORDER, 2);
+    text_label(card1, "电脑联动状态", ui->font_body, COLOR_CURSOR_GOLD, 10, 6, 200, LV_TEXT_ALIGN_LEFT);
+    ui->link_mode_label = text_label(
+        card1, "状态：内置演示画面", ui->font_small, COLOR_TEXT_MAIN, 10, 32, 200, LV_TEXT_ALIGN_LEFT
+    );
+    ui->link_seq_label = text_label(
+        card1, "已同步刷新：0 次", ui->font_small, COLOR_TEXT_SUB, 10, 54, 200, LV_TEXT_ALIGN_LEFT
+    );
+
+    lv_obj_t *card2 = pixel_box(ui->link_layer, 10, 98, 220, 92, COLOR_BG_PANEL, 8, COLOR_DONE_BORDER, 1);
+    text_label(card2, "同步方式", ui->font_body, COLOR_DONE_BORDER, 10, 6, 200, LV_TEXT_ALIGN_LEFT);
+    ui->link_ssid_label = text_label(
+        card2, "当前使用 USB 数据线同步", ui->font_small, COLOR_TEXT_MAIN, 10, 32, 200, LV_TEXT_ALIGN_LEFT
+    );
+    ui->link_url_label = text_label(
+        card2, "电脑运行 passport_tower.py", ui->font_small, COLOR_TEXT_SUB, 10, 54, 200, LV_TEXT_ALIGN_LEFT
+    );
+
+    lv_obj_t *card3 = pixel_box(ui->link_layer, 10, 198, 220, 66, COLOR_BG_PANEL, 8, COLOR_IDLE_BORDER, 1);
+    text_label(card3, "颜色含义说明", ui->font_small, COLOR_CURSOR_GOLD, 10, 6, 200, LV_TEXT_ALIGN_LEFT);
+    text_label(card3, "橙色:等你确认  绿色:跑完了!", ui->font_small, COLOR_TEXT_SUB, 10, 26, 200, LV_TEXT_ALIGN_LEFT);
+    text_label(card3, "黄色:正在用    蓝色:后台跑着", ui->font_small, COLOR_TEXT_SUB, 10, 44, 200, LV_TEXT_ALIGN_LEFT);
+    set_visible(ui->link_layer, false);
+
+    // 底部操作栏 (296..320px)
+    lv_obj_t *footer = pixel_box(screen, 0, 296, 240, 24, COLOR_BG_BAR, 0, 0, 0);
+    ui->footer_label = text_label(
+        footer,
+        "上下:选工位  OK:切过去  双击:已看",
+        ui->font_small,
+        COLOR_TEXT_SUB,
+        10,
+        4,
+        220,
+        LV_TEXT_ALIGN_CENTER
+    );
+
     tower_ui_render(ui, model);
+    lv_screen_load(screen);
     ui->battery_timer = lv_timer_create(on_battery_timer, 15000, ui);
 }

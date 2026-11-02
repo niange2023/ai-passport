@@ -4,10 +4,11 @@
 // 架构与运行时约束：
 // 1. 按键回调仅将轻量事件入队 s_input_queue，绝不阻塞。
 // 2. 应用主循环与后台同步任务访问 LVGL 控件时均严格持有 bsp_lvgl_lock()。
-// 3. 支持双模实时联动：
+// 3. 启动顺序严格执行：bsp_display_init() -> bsp_lvgl_init() -> bsp_display_backlight()
+//    -> tower_ui_init() -> bsp_button_init()，确保首帧立即覆盖 ST7789P3 GRAM。
+// 4. 支持双模实时联动：
 //    - USB-C 串口直连（读取主机发送的 TOWER_SYNC v1 帧，按键时输出 TOWER_CMD 帧）；
 //    - Wi-Fi 局域网轮询（若 NVS 已配置 Wi-Fi 凭据与 Mac 地址，后台自动连接并拉取最新状态）。
-// 4. 全程零敏感信息：仅传输与展示脱敏应用代号、五态枚举与持续分钟数。
 #include "tower_model.h"
 #include "tower_store.h"
 #include "tower_ui.h"
@@ -15,7 +16,6 @@
 #include <stdio.h>
 #include <string.h>
 
-#include "bsp_audio.h"
 #include "bsp_battery.h"
 #include "bsp_button.h"
 #include "bsp_display.h"
@@ -63,7 +63,7 @@ static volatile bool s_input_ready = false;
 static volatile bool s_wifi_connected = false;
 static volatile bool s_wifi_sync_requested = false;
 static uint32_t s_idle_ms = 0;
-static uint8_t s_backlight = BACKLIGHT_FULL;
+static uint8_t s_backlight = 0;
 static bool s_usb_driver_ready = false;
 
 static void set_backlight(uint8_t percent)
@@ -73,7 +73,6 @@ static void set_backlight(uint8_t percent)
     bsp_display_backlight(percent);
 }
 
-// 将 BSP 按钮事件映射为总控台纯逻辑输入枚举
 static bool map_input(const input_event_t *ev, tower_input_t *out)
 {
     if (ev->event == BSP_BTN_CLICK) {
@@ -94,7 +93,6 @@ static bool map_input(const input_event_t *ev, tower_input_t *out)
     return false;
 }
 
-// 按键中断/轮询回调：仅做非阻塞入队
 static void on_button_event(bsp_btn_t button, bsp_btn_ev_t event, void *user)
 {
     (void)user;
@@ -103,7 +101,6 @@ static void on_button_event(bsp_btn_t button, bsp_btn_ev_t event, void *user)
     (void)xQueueSend(s_input_queue, &item, 0);
 }
 
-// 通过 USB-Serial-JTAG 向 Mac 发送单行控制指令（如 TOWER_CMD FOCUS 0 AIME）
 static void send_serial_command(const char *cmd_line)
 {
     if (!cmd_line) return;
@@ -116,7 +113,6 @@ static void send_serial_command(const char *cmd_line)
     }
 }
 
-// 通过 HTTP POST 将切窗/收菜指令同步给局域网 Mac（当 Wi-Fi 已连接时）
 static void send_http_action(tower_action_t action, uint8_t slot_index, const char *code)
 {
     if (!s_wifi_connected || !s_wifi_cfg.configured) return;
@@ -160,12 +156,10 @@ static void send_http_action(tower_action_t action, uint8_t slot_index, const ch
     esp_http_client_cleanup(client);
 }
 
-// 处理接收到的一行外部命令（来自 USB 串口或 HTTP 响应）
 static void handle_incoming_line(const char *line, tower_link_mode_t source_mode)
 {
     if (!line || line[0] == '\0') return;
 
-    // 1. 检查是否为串口下发的 Wi-Fi 配网指令：TOWER_WIFI <ssid> <pass> <url>
     char ssid[33];
     char pass[65];
     char url[128];
@@ -186,7 +180,6 @@ static void handle_incoming_line(const char *line, tower_link_mode_t source_mode
         return;
     }
 
-    // 2. 检查是否为 12 窗口脱敏状态同步帧：TOWER_SYNC v1 ...
     if (xSemaphoreTake(s_model_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
         bool ok = tower_model_parse_sync(&s_model, line, source_mode);
         if (ok) {
@@ -201,8 +194,6 @@ static void handle_incoming_line(const char *line, tower_link_mode_t source_mode
     }
 }
 
-// USB-Serial-JTAG 后台读取任务：遵循 serial-screenshot-protocol 经验，
-// 先安装驱动并压低任务优先级至 3，每次空读或错误均带 vTaskDelay 退避，绝不忙等。
 static void usb_serial_rx_task(void *arg)
 {
     (void)arg;
@@ -218,7 +209,7 @@ static void usb_serial_rx_task(void *arg)
 
         int n = usb_serial_jtag_read_bytes(rx_chunk, sizeof(rx_chunk), pdMS_TO_TICKS(100));
         if (n <= 0) {
-            vTaskDelay(pdMS_TO_TICKS(50));
+            vTaskDelay(pdMS_TO_TICKS(200));
             continue;
         }
 
@@ -233,14 +224,12 @@ static void usb_serial_rx_task(void *arg)
             } else if (line_len + 1U < sizeof(line_buf)) {
                 line_buf[line_len++] = ch;
             } else {
-                // 超长行直接丢弃并重置缓冲，防止异常输入污染
                 line_len = 0;
             }
         }
     }
 }
 
-// Wi-Fi 事件回调：跟踪 STA 连接与 IP 获取状态
 static void on_wifi_event(
     void *arg,
     esp_event_base_t event_base,
@@ -260,7 +249,6 @@ static void on_wifi_event(
     }
 }
 
-// 通过 HTTP GET 拉取一次 Mac 端的 /api/passport-tower/wire 单行状态帧
 static void poll_http_tower_wire(void)
 {
     if (!s_wifi_connected || !s_wifi_cfg.configured) return;
@@ -275,8 +263,7 @@ static void poll_http_tower_wire(void)
     if (!client) return;
 
     if (esp_http_client_open(client, 0) == ESP_OK) {
-        int content_len = esp_http_client_fetch_headers(client);
-        (void)content_len;
+        (void)esp_http_client_fetch_headers(client);
         char buf[TOWER_WIRE_MAX_LEN];
         int read_len = esp_http_client_read(client, buf, sizeof(buf) - 1);
         if (read_len > 0) {
@@ -288,7 +275,6 @@ static void poll_http_tower_wire(void)
     esp_http_client_cleanup(client);
 }
 
-// Wi-Fi 后台轮询任务：仅在 NVS 已配置 Wi-Fi 时按需初始化 STA 并每 3 秒轮询一次
 static void wifi_poll_task(void *arg)
 {
     (void)arg;
@@ -335,13 +321,11 @@ static void wifi_poll_task(void *arg)
     }
 }
 
-// 处理一次物理按键事件
 static void process_button_input(const input_event_t *ev)
 {
     tower_input_t mapped;
     if (!map_input(ev, &mapped)) return;
 
-    // 息屏或暗屏状态下首次按键先恢复全亮背光
     if (s_backlight == 0) {
         s_idle_ms = 0;
         set_backlight(BACKLIGHT_FULL);
@@ -388,8 +372,43 @@ void app_main(void)
 
     s_model_mutex = xSemaphoreCreateMutex();
     s_input_queue = xQueueCreate(INPUT_QUEUE_DEPTH, sizeof(input_event_t));
+    if (!s_model_mutex || !s_input_queue) {
+        ESP_LOGE(TAG, "Failed to allocate sync primitives");
+        return;
+    }
 
-    // 安装 USB-Serial-JTAG 驱动以支持安全的双向串口帧收发
+    (void)tower_store_init();
+    (void)tower_store_load_wifi(&s_wifi_cfg);
+    tower_model_init(&s_model);
+
+    if (bsp_i2c_init() != ESP_OK) {
+        ESP_LOGW(TAG, "I2C unavailable");
+    } else if (bsp_battery_init() != ESP_OK) {
+        ESP_LOGW(TAG, "Battery gauge unavailable");
+    }
+
+    // 关键：必须同时调用 bsp_display_init() 与 bsp_lvgl_init()，否则 bsp_lvgl_lock()
+    // 恒返回 false，ST7789P3 GRAM 会一直保留上一次固件的残留画面！
+    if (bsp_display_init() != ESP_OK || !bsp_lvgl_init()) {
+        ESP_LOGE(TAG, "Display or LVGL initialization failed (MOSI=%d SCLK=%d CS=%d)",
+                 BSP_LCD_MOSI, BSP_LCD_SCLK, BSP_LCD_CS);
+        return;
+    }
+    set_backlight(BACKLIGHT_FULL);
+
+    if (!bsp_lvgl_lock(1000)) {
+        ESP_LOGE(TAG, "Could not acquire initial LVGL lock");
+        return;
+    }
+    tower_ui_init(&s_ui, &s_model, &s_wifi_cfg, &tower_cjk_12, &tower_cjk_14);
+    bsp_lvgl_unlock();
+
+    if (bsp_button_init(on_button_event, NULL) != ESP_OK) {
+        ESP_LOGE(TAG, "Button initialization failed");
+        return;
+    }
+    s_input_ready = true;
+
     usb_serial_jtag_driver_config_t usb_cfg = {
         .tx_buffer_size = 1024,
         .rx_buffer_size = 256,
@@ -399,25 +418,6 @@ void app_main(void)
         s_usb_driver_ready = true;
     }
 
-    (void)tower_store_init();
-    (void)tower_store_load_wifi(&s_wifi_cfg);
-    tower_model_init(&s_model);
-
-    if (bsp_i2c_init() == ESP_OK) {
-        (void)bsp_battery_init();
-    }
-
-    ESP_ERROR_CHECK(bsp_display_init());
-    ESP_ERROR_CHECK(bsp_button_init(on_button_event, NULL));
-
-    if (bsp_lvgl_lock(1000)) {
-        tower_ui_init(&s_ui, &s_model, &s_wifi_cfg, &tower_cjk_12, &tower_cjk_14);
-        bsp_lvgl_unlock();
-    }
-
-    s_input_ready = true;
-
-    // 启动低优先级 (3 < LVGL 4) 串口监听与 Wi-Fi 轮询任务
     xTaskCreate(usb_serial_rx_task, "tower_usb_rx", 4096, NULL, 3, NULL);
     xTaskCreate(wifi_poll_task, "tower_wifi", 5120, NULL, 3, NULL);
 
@@ -445,17 +445,20 @@ void app_main(void)
             set_backlight(BACKLIGHT_DIM);
         }
 
-        // 每 1000ms 更新一次上屏像素小人动画帧（敲键盘/挥手）与底部 Toast 倒计时
-        if (anim_accum_ms >= 1000U && s_backlight > 0) {
+        if (anim_accum_ms >= 500U && s_backlight > 0) {
             anim_accum_ms = 0;
             if (xSemaphoreTake(s_model_mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
-                s_model.anim_tick++;
-                if (s_model.toast_ticks > 0) {
-                    s_model.toast_ticks--;
-                }
-                if (bsp_lvgl_lock(100)) {
-                    tower_ui_render(&s_ui, &s_model);
-                    bsp_lvgl_unlock();
+                bool has_urgent = (s_model.wait_count > 0 || s_model.done_count > 0);
+                bool has_toast = (s_model.toast_ticks > 0);
+                if (has_urgent || has_toast) {
+                    s_model.anim_tick++;
+                    if (s_model.toast_ticks > 0) {
+                        s_model.toast_ticks--;
+                    }
+                    if (bsp_lvgl_lock(100)) {
+                        tower_ui_render(&s_ui, &s_model);
+                        bsp_lvgl_unlock();
+                    }
                 }
                 xSemaphoreGive(s_model_mutex);
             }
