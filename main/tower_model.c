@@ -5,14 +5,14 @@
 #include <stdio.h>
 #include <string.h>
 
-// 默认展示的 6 个常用 AI 与工作工位（未连电脑或刚开机时一眼看懂）
+// 默认展示的 6 个常用 AI 与工作工位（未连上电脑同步前全部保持安静的「休息中」，不伪造假报警）
 static const tower_slot_t k_default_slots[TOWER_SLOT_COUNT] = {
-    { "TRAE1", TOWER_ROLE_WRITE,  TOWER_STATE_DONE,   2  },
-    { "AIME",  TOWER_ROLE_SEARCH, TOWER_STATE_WAIT,   5  },
-    { "CURS1", TOWER_ROLE_CODE,   TOWER_STATE_ACTIVE, 1  },
-    { "MULT",  TOWER_ROLE_TASK,   TOWER_STATE_RUN,    4  },
-    { "CHRM1", TOWER_ROLE_DOC,    TOWER_STATE_RUN,    8  },
-    { "FEIS",  TOWER_ROLE_CHAT,   TOWER_STATE_IDLE,   20 },
+    { "TRAE1", TOWER_ROLE_WRITE,  TOWER_STATE_IDLE, 1 },
+    { "CURS1", TOWER_ROLE_CODE,   TOWER_STATE_IDLE, 1 },
+    { "AIME",  TOWER_ROLE_SEARCH, TOWER_STATE_IDLE, 1 },
+    { "MULT",  TOWER_ROLE_TASK,   TOWER_STATE_IDLE, 1 },
+    { "CHRM1", TOWER_ROLE_DOC,    TOWER_STATE_IDLE, 1 },
+    { "FEIS",  TOWER_ROLE_CHAT,   TOWER_STATE_IDLE, 1 },
 };
 
 // 根据内部代号返回直白工具名

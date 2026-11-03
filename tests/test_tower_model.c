@@ -11,23 +11,19 @@ static void test_init_and_human_readable_titles(void)
     tower_model_t model;
     tower_model_init(&model);
 
-    assert(model.wait_count == 1);
-    assert(model.done_count == 1);
-    assert(model.run_count == 3);
-    assert(model.idle_count == 1);
-
-    // 1 号 AIME (等你确认) 最优先，0 号 TRAE1 (跑完了!) 次之
-    assert(model.stage_slots[0] == 1);
-    assert(model.stage_slots[1] == 0);
-    assert(model.selected_slot == 1);
+    assert(model.wait_count == 0);
+    assert(model.done_count == 0);
+    assert(model.run_count == 0);
+    assert(model.idle_count == 6);
+    assert(model.selected_slot == 0);
 
     char title[32];
     tower_model_format_title(&model.slots[0], title, sizeof(title));
     assert(strcmp(title, "Trae·写文章") == 0);
     tower_model_format_title(&model.slots[1], title, sizeof(title));
-    assert(strcmp(title, "Aime·查资料") == 0);
-    tower_model_format_title(&model.slots[2], title, sizeof(title));
     assert(strcmp(title, "Cursor·写代码") == 0);
+    tower_model_format_title(&model.slots[2], title, sizeof(title));
+    assert(strcmp(title, "Aime·查资料") == 0);
 
     assert(strcmp(tower_model_state_text(TOWER_STATE_WAIT), "等你确认") == 0);
     assert(strcmp(tower_model_state_text(TOWER_STATE_DONE), "跑完了!") == 0);
@@ -41,8 +37,12 @@ static void test_navigation_and_focus_command(void)
     tower_model_t model;
     tower_model_init(&model);
 
-    // 初始在 1 号，按上键移回 0 号 (TRAE1)
-    tower_model_result_t res = tower_model_handle_input(&model, TOWER_INPUT_UP);
+    // 初始在 0 号 (TRAE1)，按下键移到 1 号 (CURS1)，再按上键移回 0 号
+    tower_model_result_t res = tower_model_handle_input(&model, TOWER_INPUT_DOWN);
+    assert(res.redraw);
+    assert(model.selected_slot == 1);
+
+    res = tower_model_handle_input(&model, TOWER_INPUT_UP);
     assert(res.redraw);
     assert(model.selected_slot == 0);
 
@@ -62,12 +62,20 @@ static void test_double_ok_acknowledges_urgent_slot(void)
     tower_model_t model;
     tower_model_init(&model);
 
-    // 初始选中 1 (AIME, 等你确认)，双击 OK 标记已看
+    // 先通过同步帧注入 2 个紧急工位：0 号 TRAE1 (DONE), 2 号 AIME (WAIT)
+    const char *wire =
+        "TOWER_SYNC v1 "
+        "TRAE1:D:2:1,CURS1:A:1:0,AIME:W:5:4,"
+        "MULT:R:4:3,CHRM1:R:8:2,FEIS:I:20:6\n";
+    assert(tower_model_parse_sync(&model, wire, TOWER_LINK_USB));
+    assert(model.selected_slot == 2); // 自动跳到最急的 AIME (WAIT)
+
+    // 双击 OK 标记 AIME 已看
     tower_model_result_t res = tower_model_handle_input(&model, TOWER_INPUT_OK_DOUBLE);
     assert(res.redraw);
     assert(res.action == TOWER_ACTION_ACK);
-    assert(res.target_slot == 1);
-    assert(model.slots[1].state == TOWER_STATE_RUN);
+    assert(res.target_slot == 2);
+    assert(model.slots[2].state == TOWER_STATE_RUN);
     assert(model.wait_count == 0);
 
     // 光标自动跳到下一个待处理工位 0 号 (TRAE1, 跑完了!)
