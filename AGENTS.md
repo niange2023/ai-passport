@@ -4,93 +4,36 @@
 
 # Repository Guidelines for AI Agents
 
-This file is the only mandatory entry point for AI-assisted work in this repository. Read task-specific documents from the routing table below; do not load every README by default.
+Mandatory entry point for AI work in `ai-passport`. Read only task-routed documents below; do not preload all READMEs. Detailed workflow is in [docs/development/ai-guide.md](docs/development/ai-guide.md).
 
 ## Required AI skills
 
-The following five skills are required for AI-assisted development in this repository:
-`passport-develop`, `passport-setup`, `passport-build`, `passport-device-test`, and
-`passport-debug`. Their maintained sources are under `skills/`.
-
-Before starting development, the AI must check that all five are installed and
-available in its current environment. If any are missing, the AI must choose an
-appropriate installation method for its tool and environment, perform the
-installation, and verify availability itself. Do not wait for the user to request
-installation or make the user choose the method or run installation commands.
-No particular script, installation directory, or AI client is mandatory.
-
-Respect the environment's approval requirements and preserve existing skills
-and user configuration. If permissions, conflicts, or platform limitations prevent
-installation, explain the blocker and request only the necessary user action;
-do not claim installation succeeded. Having all five available does not mean
-loading or invoking all five for every task: use only the matching skills, and
-retain the separate authorization requirements for flashing, Git writes, and publishing.
+Required skills (`skills/`): `passport-develop`, `passport-setup`, `passport-build`, `passport-device-test`, `passport-debug`. Before development, check that all five are installed; if any are missing, install and verify them automatically while respecting environment approvals and existing user config (report blockers without claiming success). Load only the skill matching the current task; flashing, Git writes, and publishing still require separate user authorization.
 
 ## Project and safety baseline
 
-- Target: ESP32-C3, 8 MB Flash, no PSRAM, ESP-IDF 5.5.3.
-- Keep the repository's default partition table minimal: NVS, PHY data, and
-  one factory application spanning the rest of the 8 MB Flash. User firmware
-  may deliberately change this layout; validate the resulting table and do not
-  turn product-specific partitions into mandatory template contracts.
-- Preserve existing user changes. Start with `git status --short --branch`; never overwrite or clean unrelated files.
-- Flashing new firmware does not require backing up the firmware already on the device; do not make a Flash readback a prerequisite. This does not guarantee preservation of user data or authorize a full-chip erase. Follow the [flashing and data policy](docs/development/engineering/firmware-layout.md#flashing-and-stored-data).
-- Hardware facts follow this priority: product specifications and measured results → `components/bsp/include/bsp_pins.h` → BSP headers and implementation → hardware guide → README/demo code. If a task requires a hardware detail not defined by these sources, ask the user instead of guessing.
-- Reusable board logic belongs in `components/bsp`; pages, state machines, animations, and application tasks belong in `main`.
-- Derivative applications must redesign and implement their own UI. Reusing the current demo test menu, screens, or visual shell is prohibited; renaming, recoloring, or adding a feature to that shell does not count as a redesign. BSP APIs and non-UI logic remain reusable. See the [mandatory UI redesign rule](docs/development/ai-guide.md#mandatory-ui-redesign-for-derivative-applications).
-- LVGL is not thread-safe. Code outside the LVGL task must hold `bsp_lvgl_lock()` while accessing LVGL objects.
-- Before adding Chinese UI text, follow the [font checklist](docs/development/engineering/coding-conventions.md#chinese-fonts-and-missing-glyphs). The default Montserrat fonts have no Chinese glyphs; UTF-8 and a successful build do not prove display support. Verify glyph coverage, widget font selection, and on-device rendering.
-- Button callbacks must stay non-blocking. Audio, storage, networking, and other slow operations belong in worker tasks.
-- A demo must stop every task, timer, callback, and event handler that can access its UI before deleting the screen.
-- Keep testable state machines, protocols, timing, and layout calculations independent from ESP-IDF/LVGL and cover them with host tests.
-- Never commit credentials, device QR secrets, private keys, personal data, or unsanitized logs.
-- Every maintained Markdown document uses English at its default `.md` path and Simplified Chinese in a paired `.zh_CN.md` file. Keep both versions aligned and retain reciprocal language links.
+- **Target & partitions**: ESP32-C3, 8 MB Flash, no PSRAM, ESP-IDF 5.5.3. Default `partitions.csv` keeps NVS, PHY, and one factory app; validate custom tables.
+- **Worktree & flashing**: Run `git status --short --branch` first and preserve user changes. Flashing does not require a prior Flash readback (see [flashing policy](docs/development/engineering/firmware-layout.md#flashing-and-stored-data)).
+- **Source priority**: Product specs/measurements → `components/bsp/include/bsp_pins.h` → BSP code → hardware guide → README/demos. Ask rather than guess missing hardware facts.
+- **Architecture & UI**: Reusable board logic in `components/bsp`; app/UI/state in `main`. Derivative apps must implement a redesigned UI (see [mandatory UI redesign](docs/development/ai-guide.md#mandatory-ui-redesign-for-derivative-applications)).
+- **Runtime & fonts**: Hold `bsp_lvgl_lock()` outside the LVGL task; keep button callbacks non-blocking; stop all tasks/timers/handlers before deleting a screen; decouple testable logic for host tests; verify Chinese glyph coverage per [font checklist](docs/development/engineering/coding-conventions.md#chinese-fonts-and-missing-glyphs).
+- **Security & docs**: Never commit secrets, device QR links, or unsanitized logs. Keep English `.md` and Simplified Chinese `.zh_CN.md` peers aligned with reciprocal links.
 
 ## Task-specific context routing
 
 | Task | Read before editing |
 | --- | --- |
-| Any code change | `docs/development/ai-guide.md`, relevant headers and neighboring implementation |
-| Application workflow or core skill setup | `skills/README.md`; ensure the five required skills are available, then use only the matching skill |
-| Environment bootstrap or missing toolchain | `docs/development/engineering/environment-setup.md` |
-| BSP, pins, buses, display, audio, battery | `docs/hardware-design/AI_HARDWARE_DEVELOPMENT_GUIDE.md`, `components/bsp/include/bsp_pins.h` |
-| Demo or menu | `main/demo.h`, `main/main.c`, the nearest `main/demo_*.c` implementation |
-| Chinese UI text or fonts | `docs/development/engineering/lvgl-chinese-fonts.md`, the application's font assets, configuration, and widget styles |
-| Wi-Fi connection or Bluetooth provisioning | `docs/development/engineering/wifi-provisioning.md`, the referenced `demo/blufi-provisioning` implementation |
-| Build, test, dependencies, partitions | `docs/development/engineering/build-and-test.md`, `docs/development/engineering/firmware-layout.md`, `sdkconfig.defaults`, `partitions.csv` |
-| CI or release | the matching file in `docs/development/ci/CI-*.md` and `.github/workflows/` |
-| Project completion | `docs/development/release/project-completion.md` (then the `issue-suggestions` or `experience-pr` skill) |
-| Documentation | `docs/contribution/doc-conventions.md`, `docs/README.md` |
-| Commit or PR | `docs/contribution/commit-and-pr.md` |
-
-Use `docs/README.md` for the product overview and the documentation index. For the detailed AI development workflow — context setup, source-of-truth priority, application/BSP boundary, runtime invariants, material placement, and delivery format — read `docs/development/ai-guide.md`. Fork-specific workflow is in `docs/fork-guide.md` and is not required for ordinary upstream development.
+| Any code change | `docs/development/ai-guide.md`, relevant headers and neighboring code |
+| Skill setup / app workflow | `skills/README.md`, then only the matching skill |
+| Environment / toolchain | `docs/development/engineering/environment-setup.md` |
+| BSP / hardware | `docs/hardware-design/AI_HARDWARE_DEVELOPMENT_GUIDE.md`, `components/bsp/include/bsp_pins.h` |
+| Demo / menu | `main/demo.h`, `main/main.c`, nearest `main/demo_*.c` |
+| Chinese UI / fonts | `docs/development/engineering/lvgl-chinese-fonts.md` |
+| Wi-Fi / BluFi | `docs/development/engineering/wifi-provisioning.md` |
+| Build / test / partitions | `docs/development/engineering/build-and-test.md`, `docs/development/engineering/firmware-layout.md`, `sdkconfig.defaults`, `partitions.csv` |
+| CI / release / completion | `docs/development/ci/CI-*.md`, `.github/workflows/`, `docs/development/release/project-completion.md` |
+| Docs / Commit / PR | `docs/README.md`, `docs/contribution/doc-conventions.md`, `docs/contribution/commit-and-pr.md` |
 
 ## Required validation and delivery
 
-Run the smallest relevant check while iterating, then run the complete gate before delivery:
-
-```bash
-./tools/validate.sh --static    # repository checks + host tests
-./tools/validate.sh --firmware  # ESP-IDF build + merged-image verification
-./tools/validate.sh             # complete gate
-```
-
-The complete gate requires an activated ESP-IDF 5.5.3 environment. Do not describe a successful build as hardware validation. Final delivery must report these fields separately:
-
-```text
-Build: PASS / FAIL / NOT RUN
-Host tests: PASS / FAIL / NOT RUN
-Device tests: PASS / FAIL / NOT RUN
-Unverified: remaining board, instrument, or user checks
-```
-
-After each complete implementation of a user-requested firmware change,
-proactively ask whether to flash it to the device for testing; do not wait for
-a release request. If no device is detected, ask the user to turn it on and
-connect it to a computer USB port with a data-capable cable. Follow the
-[on-device testing handoff](docs/development/ai-guide.md#offer-on-device-testing)
-and obtain approval before flashing; detection alone is not consent.
-
-Create commits and push only when the user requests them or the active workflow explicitly requires them. Ordinary feature, application, and documentation pull requests must not edit `docs/CHANGELOG.md` or `docs/CHANGELOG.zh_CN.md`; describe user-visible behavior, compatibility, and release-flow impact in the pull-request body and authoritative documentation instead. During release preparation, the release maintainer aggregates merged user-visible changes into both changelog files before creating the tag.
-
-Community guidance is in `.github/CONTRIBUTING.md`, `.github/CODE_OF_CONDUCT.md`, `.github/SECURITY.md`, and `.github/SUPPORT.md`.
+Run `./tools/validate.sh --static`, `--firmware`, and complete `./tools/validate.sh` (ESP-IDF 5.5.3) before delivery. Report `Build`, `Host tests`, `Device tests` (`PASS / FAIL / NOT RUN`), and `Unverified` separately. After completing a firmware change, proactively offer on-device testing per [handoff guide](docs/development/ai-guide.md#offer-on-device-testing) and obtain approval before flashing. Commit/push only when requested; feature/doc PRs must not edit `docs/CHANGELOG*.md`. Community docs live in `.github/`.
