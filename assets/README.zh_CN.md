@@ -15,6 +15,13 @@
 - 添加字库前评估 Flash 与内部 RAM 影响；ESP32-C3 无 PSRAM。
 - 不提交许可不允许分发的字库。
 
+### 随身《周易》与破局签（Pocket I-Ching & Oblique Oracle）字库
+
+`fonts/iching_cjk_14.c`、`fonts/iching_cjk_16.c` 与 `fonts/iching_cjk_20.c` 是生成的 LVGL 9 plain 4 bpp 字体子集，
+字符范围记录在 `fonts/iching_cjk_symbols.txt`（1,632 个码位），覆盖《周易》六十四卦、三百八十四爻辞、象传、现代义理及 100 条破局提问。
+源字体采用霞鹜文楷（LXGW WenKai GB Lite Regular，SIL Open Font License 1.1，见 `fonts/LXGW-WenKai-OFL.txt`），
+通过 `python3 tools/iching_font.py --check` 验证字形覆盖。
+
 ## 图片（images）
 
 可复用的源图与生成的显示资产放在 `images/`。

@@ -1,242 +1,249 @@
-// main/main.c —— FoloToy AI Passport BSP 驱动参考示例:初始化 + 菜单 + 按键分发。
+// main/main.c
+// AI Passport 「知几 · 随身《周易》与破局签 (Pocket I-Ching & Oblique Oracle)」主应用入口。
 //
-// 按键语义(全局统一):
-//   上/下 短按   菜单中=移动选中项;演示页中=该页自定义
-//   确定  短按   菜单中=进入选中项;演示页中=该页自定义
-//   确定  长按   演示页中=返回菜单(由本文件统一拦截)
-#include "bsp_i2c.h"
-#include "bsp_display.h"
-#include "bsp_button.h"
+// 器物定位：
+// - 0 联网、0 后台服务、刷一次管十年的随身赛博铜钱手把件；
+// - 内置完整《周易》六十四卦、三百八十四爻辞/象传與 100 条第一性原理破局提问；
+// - 支持三枚铜钱六爻起卦（配 ES8311 清脆铜钱落盘声与成卦泛音和弦）、破局盲抽与全书精读；
+// - 闲置自动降亮、息屏，确保随手放包里或桌角零心理负担。
+#include "iching_model.h"
+#include "iching_store.h"
+#include "iching_ui.h"
+
+#include <math.h>
+#include <stdint.h>
+#include <string.h>
+
 #include "bsp_audio.h"
 #include "bsp_battery.h"
-#include "bsp_pins.h"      // 错误日志里要打印 BSP_LCD_* 引脚号
-#include "demo.h"
-#include "demo_navigation.h"
-#include "ui_pixel.h"
-#include "lvgl.h"
+#include "bsp_button.h"
+#include "bsp_display.h"
+#include "bsp_i2c.h"
+#include "bsp_pins.h"
+#include "esp_heap_caps.h"
 #include "esp_log.h"
-#include "esp_sleep.h"
+#include "esp_random.h"
+#include "esp_system.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "freertos/task.h"
+#include "lvgl.h"
 
-static const char *TAG = "main";
+LV_FONT_DECLARE(iching_cjk_14);
+LV_FONT_DECLARE(iching_cjk_16);
+LV_FONT_DECLARE(iching_cjk_20);
 
-static const demo_entry_t DEMOS[] = {
-    { .name = "Display", .enter = demo_display_enter, .exit = demo_display_exit,
-      .key = demo_display_key },
-    { .name = "Button", .enter = demo_button_enter, .exit = demo_button_exit,
-      .key = demo_button_key },
-    { .name = "Audio", .enter = demo_audio_enter, .exit = demo_audio_exit,
-      .key = demo_audio_key, .start = demo_audio_start, .stop = demo_audio_stop },
-    { .name = "Battery", .enter = demo_battery_enter, .exit = demo_battery_exit,
-      .key = demo_battery_key },
-    { .name = "Wi-Fi", .enter = demo_wifi_enter, .exit = demo_wifi_exit,
-      .key = demo_wifi_key, .start = demo_wifi_start, .stop = demo_wifi_stop },
-    { .name = "BLE", .enter = demo_ble_enter, .exit = demo_ble_exit,
-      .key = demo_ble_key, .start = demo_ble_start, .stop = demo_ble_stop },
-    { .name = "Low Power", .enter = demo_low_power_enter, .exit = demo_low_power_exit,
-      .key = demo_low_power_key, .start = demo_low_power_start, .stop = demo_low_power_stop },
-};
-#define DEMO_COUNT (sizeof(DEMOS) / sizeof(DEMOS[0]))
-#define INPUT_QUEUE_DEPTH 8
+#define INPUT_QUEUE_DEPTH   8
+#define SOUND_QUEUE_DEPTH   4
+#define INPUT_POLL_MS       250
+#define IDLE_DIM_MS         60000U
+#define IDLE_SCREEN_OFF_MS  180000U
+#define BACKLIGHT_FULL      100
+#define BACKLIGHT_DIM       24
+#define AUDIO_SAMPLE_RATE   16000U
 
 typedef struct {
-    bsp_btn_t btn;
+    bsp_btn_t button;
     bsp_btn_ev_t event;
 } input_event_t;
 
-// 各外设初始化结果:失败的项在菜单里标 [FAIL] 且不允许进入。
-static bool s_ok[DEMO_COUNT];
+static const char *TAG = "iching_oracle";
 
-static lv_obj_t *s_menu_scr;
-static lv_obj_t *s_cards[DEMO_COUNT];
-static lv_obj_t *s_rows[DEMO_COUNT];
-static lv_obj_t *s_mascot;
-static demo_navigation_t s_navigation;
+static iching_model_t s_model;
+static iching_ui_t s_ui;
 static QueueHandle_t s_input_queue;
-static TaskHandle_t s_input_task;
-static volatile bool s_input_ready;
+static QueueHandle_t s_sound_queue;
+static volatile bool s_input_ready = false;
+static bool s_audio_ready = false;
+static uint32_t s_idle_ms = 0;
+static uint8_t s_backlight = BACKLIGHT_FULL;
 
-static void menu_refresh(void) {
-    for (size_t i = 0; i < DEMO_COUNT; i++) {
-        lv_label_set_text_fmt(s_rows[i], "%s%s",
-                              DEMOS[i].name,
-                              s_ok[i] ? "" : "  [FAIL]");
-        ui_pixel_set_selected(s_cards[i], i == s_navigation.selected, s_ok[i]);
-        lv_obj_set_style_text_color(s_rows[i],
-            s_ok[i] ? lv_color_hex(UI_INK) : lv_color_hex(0x7A2020), 0);
-    }
+static void set_backlight(uint8_t percent)
+{
+    if (s_backlight == percent) return;
+    s_backlight = percent;
+    bsp_display_backlight(percent);
 }
 
-static void menu_build(void) {
-    s_menu_scr = ui_pixel_screen_create("FoloToy");
-
-    for (size_t i = 0; i < DEMO_COUNT; i++) {
-        int x = 11 + (int)(i % 2) * 112;
-        int y = 52 + (int)(i / 2) * 47;
-        s_cards[i] = ui_pixel_panel_create(s_menu_scr, x, y, 102, 40, UI_PAPER);
-        s_rows[i] = lv_label_create(s_cards[i]);
-        lv_obj_set_style_text_font(s_rows[i], &lv_font_montserrat_14, 0);
-        lv_obj_set_style_text_align(s_rows[i], LV_TEXT_ALIGN_CENTER, 0);
-        lv_obj_center(s_rows[i]);
+static bool map_input(const input_event_t *ev, iching_input_t *out)
+{
+    if (ev->button == BSP_BTN_OK && ev->event == BSP_BTN_LONG) {
+        *out = ICHING_INPUT_BACK;
+        return true;
     }
-
-    s_mascot = ui_pixel_mascot_create(s_menu_scr, 101, 242);
-
-    menu_refresh();
-    lv_screen_load(s_menu_scr);
+    if (ev->button == BSP_BTN_OK && ev->event == BSP_BTN_DOUBLE) {
+        *out = ICHING_INPUT_OK_DOUBLE;
+        return true;
+    }
+    if (ev->event == BSP_BTN_CLICK) {
+        if (ev->button == BSP_BTN_UP) *out = ICHING_INPUT_UP;
+        else if (ev->button == BSP_BTN_DOWN) *out = ICHING_INPUT_DOWN;
+        else if (ev->button == BSP_BTN_OK) *out = ICHING_INPUT_OK;
+        else return false;
+        return true;
+    }
+    return false;
 }
 
-static void enter_menu(void) {
-    menu_build();
-}
-
-static demo_nav_input_t navigation_input(bsp_btn_t btn, bsp_btn_ev_t event) {
-    if (event == BSP_BTN_LONG && btn == BSP_BTN_OK) return DEMO_NAV_INPUT_OK_LONG;
-    if (event != BSP_BTN_CLICK) return DEMO_NAV_INPUT_OTHER;
-    if (btn == BSP_BTN_UP) return DEMO_NAV_INPUT_UP_CLICK;
-    if (btn == BSP_BTN_DOWN) return DEMO_NAV_INPUT_DOWN_CLICK;
-    if (btn == BSP_BTN_OK) return DEMO_NAV_INPUT_OK_CLICK;
-    return DEMO_NAV_INPUT_OTHER;
-}
-
-static void process_input(const input_event_t *input) {
-    demo_nav_input_t nav_input = navigation_input(input->btn, input->event);
-
-    if (s_navigation.active >= 0) {
-        demo_nav_result_t result = demo_navigation_handle(&s_navigation, nav_input, true);
-        const demo_entry_t *demo = &DEMOS[result.index];
-        if (result.action == DEMO_NAV_ACTION_EXIT) {
-            esp_err_t e = demo->stop ? demo->stop() : ESP_OK;
-            if (e != ESP_OK) {
-                ESP_LOGE(TAG, "%s 页面停止失败: %s", demo->name, esp_err_to_name(e));
-                return;
-            }
-            if (!bsp_lvgl_lock(500)) return;
-            demo->exit();
-            demo_navigation_complete_exit(&s_navigation);
-            enter_menu();
-            bsp_lvgl_unlock();
-        } else if (result.action == DEMO_NAV_ACTION_FORWARD) {
-            demo->key(input->btn, input->event);
-        }
-        return;
-    }
-
-    if (nav_input == DEMO_NAV_INPUT_OTHER || nav_input == DEMO_NAV_INPUT_OK_LONG) return;
-    if (!bsp_lvgl_lock(500)) return;
-    demo_nav_result_t result = demo_navigation_handle(
-        &s_navigation, nav_input, s_ok[s_navigation.selected]);
-    if (result.action == DEMO_NAV_ACTION_REFRESH) {
-        menu_refresh();
-        ui_pixel_mascot_jump(s_mascot);
-    } else if (result.action == DEMO_NAV_ACTION_ENTER) {
-        const demo_entry_t *demo = &DEMOS[result.index];
-        ui_pixel_mascot_jump(s_mascot);
-        lv_obj_delete(s_menu_scr);
-        s_menu_scr = NULL;
-        s_mascot = NULL;
-        demo->enter();
-        bsp_lvgl_unlock();
-
-        esp_err_t e = demo->start ? demo->start() : ESP_OK;
-        if (e != ESP_OK) {
-            ESP_LOGE(TAG, "%s 页面启动失败: %s", demo->name, esp_err_to_name(e));
-        }
-        return;
-    }
-    bsp_lvgl_unlock();
-}
-
-static void input_task(void *arg) {
-    (void)arg;
-    input_event_t input;
-    for (;;) {
-        if (xQueueReceive(s_input_queue, &input, portMAX_DELAY) == pdTRUE) {
-            process_input(&input);
-        }
-    }
-}
-
-static esp_err_t input_dispatch_init(void) {
-    s_input_queue = xQueueCreate(INPUT_QUEUE_DEPTH, sizeof(input_event_t));
-    if (!s_input_queue) return ESP_ERR_NO_MEM;
-    if (xTaskCreate(input_task, "demo_input", 4096, NULL, 5, &s_input_task) != pdPASS) {
-        vQueueDelete(s_input_queue);
-        s_input_queue = NULL;
-        return ESP_ERR_NO_MEM;
-    }
-    return ESP_OK;
-}
-
-static void input_dispatch_deinit(void) {
-    s_input_ready = false;
-    if (s_input_task) {
-        vTaskDelete(s_input_task);
-        s_input_task = NULL;
-    }
-    if (s_input_queue) {
-        vQueueDelete(s_input_queue);
-        s_input_queue = NULL;
-    }
-}
-
-// button callbacks run on the shared esp_timer task; enqueue only and return immediately.
-static void on_key(bsp_btn_t btn, bsp_btn_ev_t ev, void *user) {
+static void on_button_key(bsp_btn_t button, bsp_btn_ev_t event, void *user)
+{
     (void)user;
     if (!s_input_ready || !s_input_queue) return;
-    const input_event_t input = { .btn = btn, .event = ev };
-    (void)xQueueSend(s_input_queue, &input, 0);
+    const input_event_t item = { .button = button, .event = event };
+    (void)xQueueSend(s_input_queue, &item, 0);
 }
 
-void app_main(void) {
-    ESP_LOGI(TAG, "FoloToy AI Passport BSP demo 启动");
-    esp_sleep_wakeup_cause_t wakeup = esp_sleep_get_wakeup_cause();
-    if (wakeup != ESP_SLEEP_WAKEUP_UNDEFINED) {
-        ESP_LOGI(TAG, "休眠唤醒原因: %d", wakeup);
+// 合成一段带指数衰减包络的双频金属余韵（用于模拟铜钱落盘清响与成卦泛音）
+static void play_decaying_bell(uint32_t freq1_hz, uint32_t freq2_hz, uint32_t duration_ms, int16_t peak_amp)
+{
+    if (!s_audio_ready) return;
+
+    int16_t chunk[256];
+    uint32_t total_samples = (AUDIO_SAMPLE_RATE * duration_ms) / 1000U;
+    uint32_t phase1 = 0;
+    uint32_t phase2 = 0;
+    uint32_t step1 = (freq1_hz * 65536U) / AUDIO_SAMPLE_RATE;
+    uint32_t step2 = (freq2_hz * 65536U) / AUDIO_SAMPLE_RATE;
+
+    uint32_t generated = 0;
+    while (generated < total_samples) {
+        size_t n = total_samples - generated;
+        if (n > 256U) n = 256U;
+
+        for (size_t i = 0; i < n; i++) {
+            uint32_t pos = generated + (uint32_t)i;
+            // 线性近似指数衰减包络
+            int32_t env_num = (int32_t)(total_samples - pos);
+            int32_t env = (env_num * env_num) / (int32_t)(total_samples ? total_samples : 1U);
+
+            int32_t w1 = ((phase1 & 0x8000U) ? 1 : -1);
+            int32_t w2 = ((phase2 & 0x8000U) ? 1 : -1);
+            phase1 += step1;
+            phase2 += step2;
+
+            int32_t sample = ((w1 * 3 + w2 * 2) * peak_amp * env) / (5 * (int32_t)(total_samples ? total_samples : 1U));
+            chunk[i] = (int16_t)sample;
+        }
+        (void)bsp_audio_write(chunk, n * sizeof(int16_t));
+        generated += (uint32_t)n;
     }
+}
 
-    bsp_i2c_init();
-    bsp_i2c_scan();
+// 独立声学反馈工作任务：绝不阻塞按键回调或 LVGL 渲染任务
+static void sound_worker_task(void *arg)
+{
+    (void)arg;
+    iching_sound_t snd;
+    for (;;) {
+        if (xQueueReceive(s_sound_queue, &snd, portMAX_DELAY) != pdTRUE) {
+            continue;
+        }
+        if (!s_audio_ready) continue;
 
-    // 屏幕是本 demo 的 UI 载体,失败就没有菜单可言 —— 打清楚日志后退出,
-    // 不做"串口菜单"降级(那会让本文件复杂一倍,违背参考示例的初衷)。
-    if (bsp_display_init() != ESP_OK || !bsp_lvgl_init()) {
-        ESP_LOGE(TAG, "显示/LVGL 初始化失败,demo 无法继续。"
-                      "检查 SPI 接线(MOSI=%d SCLK=%d CS=%d DC=%d BL=%d)",
-                 BSP_LCD_MOSI, BSP_LCD_SCLK, BSP_LCD_CS, BSP_LCD_DC, BSP_LCD_BL);
+        if (snd == ICHING_SOUND_COIN) {
+            // 铜钱落盘两声清脆金属撞击音
+            play_decaying_bell(2480U, 3720U, 45U, 2600);
+            play_decaying_bell(2960U, 4440U, 65U, 2200);
+        } else if (snd == ICHING_SOUND_COMPLETE) {
+            // 六爻成卦颂钵双音和弦
+            play_decaying_bell(1046U, 1568U, 95U, 2800);
+            play_decaying_bell(1318U, 2637U, 140U, 2600);
+        } else if (snd == ICHING_SOUND_SLIP) {
+            // 竹签轻响
+            play_decaying_bell(1760U, 2640U, 55U, 2200);
+        }
+    }
+}
+
+static void process_input_event(const input_event_t *ev)
+{
+    iching_input_t mapped;
+    if (!map_input(ev, &mapped)) return;
+
+    // 息屏状态下首次按键仅点亮屏幕，不误触发摇卦或翻页
+    if (s_backlight == 0) {
+        s_idle_ms = 0;
+        set_backlight(BACKLIGHT_FULL);
         return;
     }
-    bsp_display_backlight(100);
 
-    demo_navigation_init(&s_navigation, DEMO_COUNT);
+    s_idle_ms = 0;
+    set_backlight(BACKLIGHT_FULL);
 
-    // 其余外设单项失败不阻塞:菜单里标 [FAIL],其他项照常可测。
-    s_ok[0] = true;                                   // Display 已确认可用
-    esp_err_t input_err = input_dispatch_init();
-    esp_err_t button_err = input_err == ESP_OK
-                         ? bsp_button_init(on_key, NULL)
-                         : ESP_ERR_INVALID_STATE;
-    s_ok[1] = input_err == ESP_OK && button_err == ESP_OK;
-    if (input_err != ESP_OK) {
-        ESP_LOGE(TAG, "按键事件任务创建失败: %s", esp_err_to_name(input_err));
-    } else if (button_err != ESP_OK) {
-        ESP_LOGE(TAG, "按键初始化失败: %s", esp_err_to_name(button_err));
-        input_dispatch_deinit();
+    uint32_t entropy = esp_random() ^ (uint32_t)esp_timer_get_time();
+    iching_model_result_t res = iching_model_handle(&s_model, mapped, entropy);
+
+    if (res.sound != ICHING_SOUND_NONE && s_sound_queue) {
+        (void)xQueueSend(s_sound_queue, &res.sound, 0);
     }
-    s_ok[2] = (bsp_audio_init() == ESP_OK);
-    s_ok[3] = (bsp_battery_init() == ESP_OK);
-    s_ok[4] = true;                                    // 页面内按需初始化并显示错误
-    s_ok[5] = true;
-    s_ok[6] = true;
+    if (res.redraw && bsp_lvgl_lock(500)) {
+        iching_ui_render(&s_ui, &s_model);
+        bsp_lvgl_unlock();
+    }
+    if (res.save) {
+        iching_store_save(&s_model);
+    }
+}
+
+void app_main(void)
+{
+    ESP_LOGI(TAG, "Starting Pocket I-Ching & Oblique Oracle");
+
+    (void)iching_store_init(&s_model);
+
+    if (bsp_i2c_init() == ESP_OK) {
+        (void)bsp_battery_init();
+        if (bsp_audio_init() == ESP_OK &&
+            bsp_audio_set_format(AUDIO_SAMPLE_RATE, 16, 1) == ESP_OK) {
+            bsp_audio_set_volume(65);
+            s_audio_ready = true;
+        }
+    }
+
+    if (bsp_display_init() != ESP_OK || !bsp_lvgl_init()) {
+        ESP_LOGE(TAG, "Display/LVGL init failed");
+        return;
+    }
+    bsp_display_backlight(BACKLIGHT_FULL);
 
     if (bsp_lvgl_lock(1000)) {
-        enter_menu();
+        iching_ui_init(&s_ui, &s_model, &iching_cjk_14, &iching_cjk_16, &iching_cjk_20);
         bsp_lvgl_unlock();
-        s_input_ready = true;
     }
 
-    ESP_LOGI(TAG, "就绪:Display=%d Button=%d Audio=%d Battery=%d",
-             s_ok[0], s_ok[1], s_ok[2], s_ok[3]);
+    s_input_queue = xQueueCreate(INPUT_QUEUE_DEPTH, sizeof(input_event_t));
+    s_sound_queue = xQueueCreate(SOUND_QUEUE_DEPTH, sizeof(iching_sound_t));
+
+    if (s_sound_queue) {
+        xTaskCreate(sound_worker_task, "iching_snd", 3072, NULL, 3, NULL);
+    }
+
+    if (bsp_button_init(on_button_key, NULL) != ESP_OK) {
+        ESP_LOGE(TAG, "Button init failed");
+        return;
+    }
+    s_input_ready = true;
+
+    ESP_LOGI(
+        TAG,
+        "Pocket I-Ching ready: 64 hexagrams, 384 lines, 100 prompts. Free internal heap=%u largest=%u",
+        (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+        (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL)
+    );
+
+    for (;;) {
+        input_event_t ev;
+        if (xQueueReceive(s_input_queue, &ev, pdMS_TO_TICKS(INPUT_POLL_MS)) == pdTRUE) {
+            process_input_event(&ev);
+            continue;
+        }
+
+        s_idle_ms += INPUT_POLL_MS;
+        if (s_idle_ms >= IDLE_SCREEN_OFF_MS) {
+            set_backlight(0);
+        } else if (s_idle_ms >= IDLE_DIM_MS) {
+            set_backlight(BACKLIGHT_DIM);
+        }
+    }
 }

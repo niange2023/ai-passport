@@ -17,6 +17,12 @@ Store reusable font files and generated font sources in `fonts/`.
 - Check Flash and internal-RAM impact before adding a font; the ESP32-C3 has no PSRAM.
 - Do not commit fonts whose license does not permit redistribution.
 
+### Pocket I-Ching & Oblique Oracle app fonts
+
+`fonts/iching_cjk_14.c`, `fonts/iching_cjk_16.c`, and `fonts/iching_cjk_20.c` are generated LVGL 9 plain 4 bpp font subsets.
+The character inventory in `fonts/iching_cjk_symbols.txt` (1,632 code points) covers all 64 hexagrams, 384 line texts, commentaries, and 100 breakthrough prompts.
+Generated from LXGW WenKai GB Lite Regular (SIL Open Font License 1.1, see `fonts/LXGW-WenKai-OFL.txt`) and verified with `python3 tools/iching_font.py --check`.
+
 ## Images
 
 Store reusable source images and generated display assets in `images/`.
